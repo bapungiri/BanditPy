@@ -1,5 +1,5 @@
 import numpy as np
-from .datawriter import DataWriter
+from neuropy.core import DataWriter
 from scipy import stats
 
 

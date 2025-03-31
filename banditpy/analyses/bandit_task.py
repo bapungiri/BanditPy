@@ -1,9 +1,14 @@
 import numpy as np
 import pandas as pd
+from .. import core
 
 
 def get_performance_2ab(
-    df, min_trials_per_sess=None, roll_window=80, delta_prob=None, smooth=2
+    mab: core.MultiArmedBandit,
+    min_trials_per_sess=None,
+    roll_window=80,
+    delta_prob=None,
+    smooth=2,
 ):
     """Get performance on two armed bandit task
 
@@ -26,6 +31,7 @@ def get_performance_2ab(
         _description_
     """
 
+    assert mab.n_ports == 2, "This task has more than 2 ports"
     if delta_prob is not None:
         prob_diff = np.abs(df["rewprobfull1"] - df["rewprobfull2"])
         df = df[prob_diff >= delta_prob]
