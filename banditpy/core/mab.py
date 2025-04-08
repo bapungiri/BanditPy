@@ -11,10 +11,9 @@ class MultiArmedBandit(DataWriter):
 
     def __init__(
         self,
-        probs,
-        port_choice,
-        prob_choice,
-        is_reward,
+        probs,  # array size n_trials x n_ports
+        choices,  # array size n_trials
+        rewards,  # array size n_trials
         trial_session_id,
         starts,
         stops,
@@ -25,9 +24,9 @@ class MultiArmedBandit(DataWriter):
         super().__init__(metadata=metadata)
 
         self.probs = probs
-        self.port_choice = port_choice
-        self.prob_choice = prob_choice
-        self.is_reward = is_reward
+        self.choices = choices
+        # self.prob_choices = prob_choices
+        self.rewards = rewards
         self.starts = starts
         self.stops = stops
         self.trial_session_id = trial_session_id
@@ -40,7 +39,7 @@ class MultiArmedBandit(DataWriter):
 
     @property
     def n_ports(self):
-        return self.probs.shape[0]
+        return self.probs.shape[1]
 
     @property
     def is_choice_high(self):

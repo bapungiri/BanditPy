@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 from .. import core
+from scipy.optimize import minimize
 
 
 def get_performance_2ab(
@@ -86,3 +87,59 @@ def get_port_bias_2ab(df, min_trials=250):
     # mean_choice[bin_centers < 0] = -1 * mean_choice[bin_centers < 0]
 
     return mean_choice, bin_centers
+
+
+class QlearningEstimator:
+    """Estimate Q-learning parameters for a multi-armed bandit task"""
+
+    def __init__(self, mab: core.MultiArmedBandit):
+        self.mab = mab
+
+    def compute_q_values(self, alpha_c, alpha_u):
+        Q = np.zeros(2)  # Q-values: Q[0] for Left, Q[1] for Right
+        q_values = []
+
+        for choice, reward in zip(self.mab.choices, self.mab.rewards):
+            # If Left (0) is chosen, Right (1) is unchosen, and vice versa
+            unchosen = 1 - choice
+
+            # Update Q-values for chosen and unchosen arms
+            Q[choice] += alpha_c * (reward - Q[choice])  # Chosen action update
+            Q[unchosen] += alpha_u * (0 - Q[unchosen])  # Unchosen action decay
+
+            q_values.append(Q.copy())
+
+        return np.array(q_values)
+
+    def log_likelihood(self, params):
+        # Log-likelihood function to optimize alpha_L and alpha_R
+        alpha_L, alpha_R, beta = params
+        Q_values = self.compute_q_values(alpha_L, alpha_R)
+
+        # Predictor for logistic regression: difference in Q-values (Q_right - Q_left)
+        # X = (Q_values[:, 1] - Q_values[:, 0]).reshape(-1, 1)
+        # model = LogisticRegression()
+        # model.fit(X, choices)  # Fit logistic regression on choice data
+        # probs = model.predict_proba(X)[:, 1]  # Probability of choosing right (1)
+
+        Q_diff = Q_values[:, 1] - Q_values[:, 0]
+        probs = 1 / (1 + np.exp(-beta * Q_diff))  # Softmax choice probability
+
+        # Compute log-likelihood
+        ll = np.sum(choices * np.log(probs) + (1 - choices) * np.log(1 - probs))
+        return -ll  # Negative for minimization
+
+    def fit(self):
+        # Optimize alpha_L and alpha_R using a bounded method
+        result = minimize(
+            self.log_likelihood,
+            x0=[0.5, -0.5, 1],
+            bounds=[(0, 1), (0, 1), (0, 10)],
+            method="L-BFGS-B",
+        )
+
+        estimated_params.append(result.x)
+        alpha_L_est, alpha_R_est, beta = result.x
+        print(
+            f"Estimated alpha_L: {alpha_L_est:.4f}, Estimated alpha_R: {alpha_R_est:.4f}, Estimated: beta: {beta}"
+        )
