@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from .. import core
-from scipy.optimize import minimize
+from scipy.optimize import minimize, differential_evolution
 from joblib import Parallel, delayed
 
 from pathos.multiprocessing import ProcessingPool as Pool
@@ -173,33 +173,40 @@ class QlearningEstimator:
         print(f"alpha_c: {self.alpha_c}, alpha_u: {self.alpha_u}, beta: {self.beta}")
 
     def compute_q_values(self, alpha_c, alpha_u):
-        Q = np.zeros(2)  # Initialize Q-values for two actions
+        """
+        Compute Q-values for each action based on the choices and rewards.
+
+        Note: Having initial Q-values of 0.5 instead of 0 and limiting Q-values to (0,1) helped with convergence. Not entirely sure why.
+        """
+        Q = 0.5 * np.ones(2)  # Initialize Q-values for two actions
         q_values = []
 
         for choice, reward, is_start in zip(
             self.choices, self.rewards, self.is_session_start
         ):
             if is_start:
-                Q[:] = 0.0  # Reset Q-values at session start
+                Q[:] = 0.5  # Reset Q-values at session start
 
             unchosen = 1 - choice
 
             # Q-learning update
             Q[choice] += alpha_c * (reward - Q[choice])
             Q[unchosen] += alpha_u * (reward - Q[choice])
+            # Q[unchosen] += alpha_u * (reward - Q[unchosen])
             # Q[unchosen] += alpha_u * ((1 - reward) - Q[unchosen])
             # Q[unchosen] += alpha_u * (Q[choice] - reward)
 
             q_values.append(Q.copy())
 
-        return np.array(q_values)
+        q_values = np.clip(np.array(q_values), 0, 1)
+        return q_values
 
     def log_likelihood(self, params):
         alpha_c, alpha_u, beta = params
         Q_values = self.compute_q_values(alpha_c, alpha_u)
         # Compute softmax probabilities
         betaQ = beta * Q_values
-        betaQ = np.clip(betaQ, -500, 500)  # Prevent overflow
+        # betaQ = np.clip(betaQ, -500, 500)  # Prevent overflow
         exp_Q = np.exp(betaQ)
         probs = exp_Q / np.sum(exp_Q, axis=1, keepdims=True)
         # Get the probability of the chosen action
@@ -210,17 +217,17 @@ class QlearningEstimator:
         chosen_probs = np.clip(chosen_probs, eps, 1 - eps)
 
         # Log-likelihood
-        ll = np.sum(np.log(chosen_probs))
+        ll = np.nansum(np.log(chosen_probs))
         return -ll  # For minimization
 
-    def fit(self, lb, ub, x0=None, plb=None, pub=None, method="bads", num_opts=10):
+    def fit(self, bounds, x0=None, method="diff", n_opts=1, n_cpu=1):
         # Optimize params using a bounded method
         if method == "bads":
             from pybads import BADS
 
             optimize_results = []
-            x_vec = np.zeros((num_opts, lb.shape[0]))
-            fval_vec = np.zeros(num_opts)
+            x_vec = np.zeros((n_opts, lb.shape[0]))
+            fval_vec = np.zeros(n_opts)
             options = {"display": "off", "uncertainty_handling": True}
 
             # bads_list = [
@@ -267,11 +274,38 @@ class QlearningEstimator:
                 optimize_results.append(bads.optimize())
                 x_vec[opt_count] = optimize_results[opt_count].x
                 fval_vec[opt_count] = optimize_results[opt_count].fval
+                del bads
 
             idx_best = np.argmin(fval_vec)
             result_best = optimize_results[idx_best]
             x_min = result_best["x"]
             self.alpha_c, self.alpha_u, self.beta = x_min
+
+        elif method == "diff":
+            x_vec = np.zeros((n_opts, bounds.shape[0]))
+            fval_vec = np.zeros(n_opts)
+
+            for opt_count in range(n_opts):
+                result = differential_evolution(
+                    self.log_likelihood,
+                    bounds=bounds,
+                    strategy="best1bin",
+                    maxiter=1000,
+                    popsize=15,
+                    tol=0.01,
+                    mutation=(0.5, 1),
+                    recombination=0.7,
+                    seed=None,
+                    disp=False,
+                    polish=True,
+                    init="latinhypercube",
+                    workers=n_cpu,
+                )
+                x_vec[opt_count] = result.x
+                fval_vec[opt_count] = result.fun
+
+            idx_best = np.argmin(fval_vec)
+            self.alpha_c, self.alpha_u, self.beta = x_vec[idx_best]
 
         else:
             result = minimize(

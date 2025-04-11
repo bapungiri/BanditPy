@@ -137,3 +137,82 @@ class MultiArmedBandit(DataWriter):
             datetime=df["datetime"].to_numpy(),
             metadata=None,
         )
+
+    def keep_sessions_by_trials(self, min_trials=100, clip_max=None):
+        """Keep only sessions with more than min_trials and optionally clip to max trials.
+
+        Parameters
+        ----------
+        min_trials : int, optional
+            Minimum number of trials in a session, by default 100
+        clip_max : int, optional
+            Maximum number of trials to keep per session, by default 100
+
+        Returns
+        -------
+        MultiArmedBandit
+            A new MultiArmedBandit instance with filtered sessions and trials.
+        """
+        ntrials_by_session = self.ntrials_session
+        valid_sessions = self.sessions[ntrials_by_session >= min_trials]
+        mask = np.isin(self.session_ids, valid_sessions)
+
+        # Filter data by valid sessions
+        filtered_probs = self.probs[mask]
+        filtered_choices = self.choices[mask]
+        filtered_rewards = self.rewards[mask]
+        filtered_session_ids = self.session_ids[mask]
+        filtered_starts = self.starts[mask]
+        filtered_stops = self.stops[mask]
+        filtered_datetime = self.datetime[mask]
+
+        # Clip to max trials per session if clip_max is specified
+        if clip_max is not None:
+            clipped_mask = []
+            for session in valid_sessions:
+                session_mask = filtered_session_ids == session
+                session_indices = np.where(session_mask)[0][:clip_max]
+                clipped_mask.extend(session_indices)
+
+            clipped_mask = np.array(clipped_mask)
+            filtered_probs = filtered_probs[clipped_mask]
+            filtered_choices = filtered_choices[clipped_mask]
+            filtered_rewards = filtered_rewards[clipped_mask]
+            filtered_session_ids = filtered_session_ids[clipped_mask]
+            filtered_starts = filtered_starts[clipped_mask]
+            filtered_stops = filtered_stops[clipped_mask]
+            filtered_datetime = filtered_datetime[clipped_mask]
+
+        return MultiArmedBandit(
+            probs=filtered_probs,
+            choices=filtered_choices,
+            rewards=filtered_rewards,
+            session_ids=filtered_session_ids,
+            starts=filtered_starts,
+            stops=filtered_stops,
+            datetime=filtered_datetime,
+            metadata=None,
+        )
+
+    def trim_sessions(self, trial_start, trial_stop):
+        pass
+
+    def keep_sessions_by_prob_diff(probs, session_ids, min_diff=0.2):
+        """
+        Select sessions where the probability difference between two ports exceeds a threshold.
+
+        Parameters:
+            probs (array-like): Array of shape (n_trials, 2) containing probabilities for two ports.
+            session_ids (array-like): Array of session IDs corresponding to each trial.
+            min_diff (float): Minimum probability difference threshold. Default is 0.2.
+
+        Returns:
+            array-like: Array of session IDs that meet the criteria.
+        """
+        # Calculate the absolute difference between probabilities of the two ports
+        prob_diff = np.abs(probs[:, 0] - probs[:, 1])
+
+        # Identify sessions where the probability difference exceeds the threshold
+        valid_sessions = np.unique(session_ids[prob_diff > min_diff])
+
+        return valid_sessions
