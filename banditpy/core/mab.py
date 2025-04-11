@@ -1,6 +1,7 @@
 import numpy as np
 from neuropy.core import DataWriter
 from scipy import stats
+import pandas as pd
 
 
 class MultiArmedBandit(DataWriter):
@@ -14,27 +15,33 @@ class MultiArmedBandit(DataWriter):
         probs,  # array size n_trials x n_ports
         choices,  # array size n_trials
         rewards,  # array size n_trials
-        trial_session_id,
+        session_ids,
         starts,
         stops,
         datetime,
         metadata=None,
     ):
-
         super().__init__(metadata=metadata)
+        assert probs.ndim == 2, "probs must be 2D array"
+        assert (
+            probs.shape[1] == 2
+        ), "probs must be 2D array with 2 columns, This is implemented for 2AB task only"
+        assert probs.shape[0] == len(choices), "probs and choices must have same length"
+        assert len(choices) == len(rewards), "choices and rewards must have same length"
+        assert len(rewards) == len(
+            session_ids
+        ), "choices and session_ids must have same length"
 
         self.probs = probs
-        self.choices = choices
-        # self.prob_choices = prob_choices
-        self.rewards = rewards
+        self.choices = choices.astype(int)
+        self.rewards = rewards.astype(int)
         self.starts = starts
         self.stops = stops
-        self.trial_session_id = trial_session_id
-        self.trial_session_id = trial_session_id
+        self.session_ids = session_ids
         self.datetime = datetime
 
-        self.session_ids, self.ntrials_session = np.unique(
-            self.trial_session_id, return_counts=True
+        self.sessions, self.ntrials_session = np.unique(
+            self.session_ids, return_counts=True
         )
 
     @property
@@ -43,7 +50,7 @@ class MultiArmedBandit(DataWriter):
 
     @property
     def is_choice_high(self):
-        return np.max(self.probs, axis=0) == self.prob_choice
+        return np.max(self.probs, axis=1) == self.choices
 
     @property
     def mean_ntrials(self):
@@ -59,6 +66,31 @@ class MultiArmedBandit(DataWriter):
 
     def from_csv(self):
         return None
+
+    @property
+    def probs_corr(self):
+        return stats.pearsonr(self.probs[:, 0], self.probs[:, 1])[0]
+
+    @property
+    def is_structured(self):
+        return np.abs(self.probs_corr) > 0.9
+
+    @property
+    def is_session_start(self):
+        session_starts = np.diff(self.session_ids, prepend=self.session_ids[0])
+        session_starts = np.clip(session_starts, 0, 1)
+        session_starts[0] = 1  # First trial is always a start
+        return session_starts
+
+    def get_binarized_choices(self):
+        """Get binarized choices for the task
+
+        Returns
+        -------
+        _type_
+            _description_
+        """
+        return np.where(self.choices == 1, 1, 0)
 
     def get_port_bias_2ab(df, min_trials=250):
 
@@ -79,3 +111,29 @@ class MultiArmedBandit(DataWriter):
         # mean_choice[bin_centers < 0] = -1 * mean_choice[bin_centers < 0]
 
         return mean_choice, bin_centers
+
+    @staticmethod
+    def from_csv(fp):
+        """This function primarily written to handle data from anirudh's bandit task/processed data
+
+        Parameters
+        ----------
+        fp : .csv file name
+            File path to the csv file that contains the data
+
+        Returns
+        -------
+        _type_
+            _description_
+        """
+        df = pd.read_csv(fp)
+        return MultiArmedBandit(
+            probs=df.loc[:, ["rewprobfull1", "rewprobfull2"]].to_numpy(),
+            choices=df["port"].to_numpy(),
+            rewards=df["reward"].to_numpy(),
+            session_ids=df["session#"].to_numpy(),
+            starts=df["trialstart"].to_numpy(),
+            stops=df["trialend"].to_numpy(),
+            datetime=df["datetime"].to_numpy(),
+            metadata=None,
+        )
