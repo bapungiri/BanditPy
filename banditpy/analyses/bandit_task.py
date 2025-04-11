@@ -2,6 +2,13 @@ import numpy as np
 import pandas as pd
 from .. import core
 from scipy.optimize import minimize
+from joblib import Parallel, delayed
+
+from pathos.multiprocessing import ProcessingPool as Pool
+import multiprocessing
+
+from numpy.lib.stride_tricks import sliding_window_view
+from sklearn.linear_model import LogisticRegression
 
 
 def get_performance_2ab(
@@ -89,57 +96,189 @@ def get_port_bias_2ab(df, min_trials=250):
     return mean_choice, bin_centers
 
 
+class HistoryBasedLogisticModel:
+    """Based on Miller et al. 2021, "From predictive models to cognitive models....." """
+
+    def __init__(self, mab: core.MultiArmedBandit, n_hist=5):
+        assert mab.n_ports == 2, "Only 2-armed bandit task is supported"
+        self.choices, self.rewards = self._reformat_choices_rewards(
+            mab.choices, mab.rewards
+        )
+        self.rewards = mab.rewards
+        self.n_hist = n_hist
+        self.model = LogisticRegression(solver="lbfgs")
+        self.feature_names = []
+
+    def _reformat_choices_rewards(self, choices, rewards):
+        """
+        Convert choices to -1 for left, 1 for right.
+        Convert rewards to -1 for no reward, 1 for reward.
+        """
+        choices[choices == 1] = -1
+        choices[choices == 2] = 1
+
+        rewards[rewards == 0] = -1
+        rewards[rewards == 1] = 1
+        return choices, rewards
+
+    def _prepare_features(self, choices, rewards):
+        """
+        Prepare lagged features using sliding_window_view.
+        """
+        # Generate sliding windows
+        C_windows = sliding_window_view(choices, window_shape=self.n_hist)[:-1]
+        R_windows = sliding_window_view(rewards, window_shape=self.n_hist)[:-1]
+        targets = choices[self.n_hist :]
+
+        # Interaction term
+        CxR_windows = C_windows * R_windows
+
+        # Stack features: shape (n_samples, n_lags * 3)
+        X = np.hstack([C_windows, R_windows, CxR_windows])
+        y = (targets == 1).astype(int)  # 1 for right, 0 for left
+
+        if not self.feature_names:
+            for k in range(1, self.n_hist + 1):
+                self.feature_names.extend([f"C_{k}", f"O_{k}", f"CxO_{k}"])
+
+        return X, y
+
+    def fit(self, choices, outcomes):
+        X, y = self._prepare_features(choices, outcomes)
+        self.model.fit(X, y)
+        return self
+
+    def predict_proba(self, choices, outcomes):
+        X, _ = self._prepare_features(choices, outcomes)
+        return self.model.predict_proba(X)[:, 1]  # Prob of choosing right
+
+    def get_coefficients(self):
+        return dict(zip(self.feature_names, self.model.coef_[0]))
+
+
 class QlearningEstimator:
     """Estimate Q-learning parameters for a multi-armed bandit task"""
 
     def __init__(self, mab: core.MultiArmedBandit):
-        self.mab = mab
+        assert mab.n_ports == 2, "This task has more than 2 ports"
+        self.choices = mab.get_binarized_choices().astype(int)
+        self.rewards = mab.rewards
+        self.is_session_start = mab.is_session_start
+        self.session_ids = mab.session_ids
+        self.alpha_c = None  # Learning rate for chosen action
+        self.alpha_u = None  # Learning rate for unchosen action
+        self.beta = None  # Inverse temperature parameter
+
+    def print_params(self):
+        print(f"alpha_c: {self.alpha_c}, alpha_u: {self.alpha_u}, beta: {self.beta}")
 
     def compute_q_values(self, alpha_c, alpha_u):
-        Q = np.zeros(2)  # Q-values: Q[0] for Left, Q[1] for Right
+        Q = np.zeros(2)  # Initialize Q-values for two actions
         q_values = []
 
-        for choice, reward in zip(self.mab.choices, self.mab.rewards):
-            # If Left (0) is chosen, Right (1) is unchosen, and vice versa
+        for choice, reward, is_start in zip(
+            self.choices, self.rewards, self.is_session_start
+        ):
+            if is_start:
+                Q[:] = 0.0  # Reset Q-values at session start
+
             unchosen = 1 - choice
 
-            # Update Q-values for chosen and unchosen arms
-            Q[choice] += alpha_c * (reward - Q[choice])  # Chosen action update
-            Q[unchosen] += alpha_u * (0 - Q[unchosen])  # Unchosen action decay
+            # Q-learning update
+            Q[choice] += alpha_c * (reward - Q[choice])
+            Q[unchosen] += alpha_u * (reward - Q[choice])
+            # Q[unchosen] += alpha_u * ((1 - reward) - Q[unchosen])
+            # Q[unchosen] += alpha_u * (Q[choice] - reward)
 
             q_values.append(Q.copy())
 
         return np.array(q_values)
 
     def log_likelihood(self, params):
-        # Log-likelihood function to optimize alpha_L and alpha_R
-        alpha_L, alpha_R, beta = params
-        Q_values = self.compute_q_values(alpha_L, alpha_R)
+        alpha_c, alpha_u, beta = params
+        Q_values = self.compute_q_values(alpha_c, alpha_u)
+        # Compute softmax probabilities
+        betaQ = beta * Q_values
+        betaQ = np.clip(betaQ, -500, 500)  # Prevent overflow
+        exp_Q = np.exp(betaQ)
+        probs = exp_Q / np.sum(exp_Q, axis=1, keepdims=True)
+        # Get the probability of the chosen action
+        chosen_probs = probs[np.arange(len(self.choices)), self.choices]
 
-        # Predictor for logistic regression: difference in Q-values (Q_right - Q_left)
-        # X = (Q_values[:, 1] - Q_values[:, 0]).reshape(-1, 1)
-        # model = LogisticRegression()
-        # model.fit(X, choices)  # Fit logistic regression on choice data
-        # probs = model.predict_proba(X)[:, 1]  # Probability of choosing right (1)
+        # Numerical stability
+        eps = 1e-9
+        chosen_probs = np.clip(chosen_probs, eps, 1 - eps)
 
-        Q_diff = Q_values[:, 1] - Q_values[:, 0]
-        probs = 1 / (1 + np.exp(-beta * Q_diff))  # Softmax choice probability
+        # Log-likelihood
+        ll = np.sum(np.log(chosen_probs))
+        return -ll  # For minimization
 
-        # Compute log-likelihood
-        ll = np.sum(choices * np.log(probs) + (1 - choices) * np.log(1 - probs))
-        return -ll  # Negative for minimization
+    def fit(self, lb, ub, x0=None, plb=None, pub=None, method="bads", num_opts=10):
+        # Optimize params using a bounded method
+        if method == "bads":
+            from pybads import BADS
 
-    def fit(self):
-        # Optimize alpha_L and alpha_R using a bounded method
-        result = minimize(
-            self.log_likelihood,
-            x0=[0.5, -0.5, 1],
-            bounds=[(0, 1), (0, 1), (0, 10)],
-            method="L-BFGS-B",
-        )
+            optimize_results = []
+            x_vec = np.zeros((num_opts, lb.shape[0]))
+            fval_vec = np.zeros(num_opts)
+            options = {"display": "off", "uncertainty_handling": True}
 
-        estimated_params.append(result.x)
-        alpha_L_est, alpha_R_est, beta = result.x
-        print(
-            f"Estimated alpha_L: {alpha_L_est:.4f}, Estimated alpha_R: {alpha_R_est:.4f}, Estimated: beta: {beta}"
-        )
+            # bads_list = [
+            #     BADS(
+            #         fun=self.log_likelihood,
+            #         x0=None,
+            #         lower_bounds=lb,
+            #         upper_bounds=ub,
+            #         plausible_lower_bounds=plb,
+            #         plausible_upper_bounds=pub,
+            #         options={
+            #             "display": "off",
+            #             "uncertainty_handling": True,
+            #             "random_seed": opt_count,
+            #         },
+            #     )
+            #     for opt_count in range(num_opts)
+            # ]
+
+            # with Pool(4) as p:  # 4 is the number of parallel processes
+            #     results = p.map(lambda obj: obj.optimize(), bads_list)
+
+            # def optimize_bads(bads_obj):
+            #     return bads_obj.optimize()
+
+            # with multiprocessing.Pool(4) as pool:
+            #     results = pool.map(optimize_bads, bads_list)
+
+            # print(results[0])
+            # results = Parallel(n_jobs=4)(delayed(optimize_bads)(bd) for bd in bads_list)
+
+            for opt_count in range(num_opts):
+                print("Running optimization " + str(opt_count) + "...")
+                options["random_seed"] = opt_count
+                bads = BADS(
+                    self.log_likelihood,
+                    x0=None,
+                    lower_bounds=lb,
+                    upper_bounds=ub,
+                    plausible_lower_bounds=plb,
+                    plausible_upper_bounds=pub,
+                    options=options,
+                )
+                optimize_results.append(bads.optimize())
+                x_vec[opt_count] = optimize_results[opt_count].x
+                fval_vec[opt_count] = optimize_results[opt_count].fval
+
+            idx_best = np.argmin(fval_vec)
+            result_best = optimize_results[idx_best]
+            x_min = result_best["x"]
+            self.alpha_c, self.alpha_u, self.beta = x_min
+
+        else:
+            result = minimize(
+                self.log_likelihood,
+                x0=[0.5, -0.5, 1],
+                bounds=[(0, 1), (0, 1), (0, 10)],
+                method="L-BFGS-B",
+            )
+
+            self.alpha_c, self.alpha_u, self.beta = result.x
