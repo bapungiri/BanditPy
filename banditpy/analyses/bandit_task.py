@@ -256,61 +256,7 @@ class QlearningEstimator:
         if method == "bads":
             from pybads import BADS
 
-            optimize_results = []
-            x_vec = np.zeros((n_opts, lb.shape[0]))
-            fval_vec = np.zeros(n_opts)
-            options = {"display": "off", "uncertainty_handling": True}
-
-            # bads_list = [
-            #     BADS(
-            #         fun=self.log_likelihood,
-            #         x0=None,
-            #         lower_bounds=lb,
-            #         upper_bounds=ub,
-            #         plausible_lower_bounds=plb,
-            #         plausible_upper_bounds=pub,
-            #         options={
-            #             "display": "off",
-            #             "uncertainty_handling": True,
-            #             "random_seed": opt_count,
-            #         },
-            #     )
-            #     for opt_count in range(num_opts)
-            # ]
-
-            # with Pool(4) as p:  # 4 is the number of parallel processes
-            #     results = p.map(lambda obj: obj.optimize(), bads_list)
-
-            # def optimize_bads(bads_obj):
-            #     return bads_obj.optimize()
-
-            # with multiprocessing.Pool(4) as pool:
-            #     results = pool.map(optimize_bads, bads_list)
-
-            # print(results[0])
-            # results = Parallel(n_jobs=4)(delayed(optimize_bads)(bd) for bd in bads_list)
-
-            for opt_count in range(num_opts):
-                print("Running optimization " + str(opt_count) + "...")
-                options["random_seed"] = opt_count
-                bads = BADS(
-                    self.log_likelihood,
-                    x0=None,
-                    lower_bounds=lb,
-                    upper_bounds=ub,
-                    plausible_lower_bounds=plb,
-                    plausible_upper_bounds=pub,
-                    options=options,
-                )
-                optimize_results.append(bads.optimize())
-                x_vec[opt_count] = optimize_results[opt_count].x
-                fval_vec[opt_count] = optimize_results[opt_count].fval
-                del bads
-
-            idx_best = np.argmin(fval_vec)
-            result_best = optimize_results[idx_best]
-            x_min = result_best["x"]
-            self.alpha_c, self.alpha_u, self.beta = x_min
+            pass
 
         elif method == "diff":
             x_vec = np.zeros((n_opts, bounds.shape[0]))
