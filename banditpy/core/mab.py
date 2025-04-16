@@ -138,7 +138,7 @@ class MultiArmedBandit(DataWriter):
             metadata=None,
         )
 
-    def keep_sessions_by_trials(self, min_trials=100, clip_max=None):
+    def keep_by_trials(self, min_trials=100, clip_max=None):
         """Keep only sessions with more than min_trials and optionally clip to max trials.
 
         Parameters
@@ -197,7 +197,7 @@ class MultiArmedBandit(DataWriter):
     def trim_sessions(self, trial_start, trial_stop):
         pass
 
-    def keep_sessions_by_prob_diff(probs, session_ids, min_diff=0.2):
+    def keep_by_probdiff(probs, session_ids, min_diff=0.2):
         """
         Select sessions where the probability difference between two ports exceeds a threshold.
 
