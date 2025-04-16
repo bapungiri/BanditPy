@@ -9,6 +9,7 @@ import multiprocessing
 
 from numpy.lib.stride_tricks import sliding_window_view
 from sklearn.linear_model import LogisticRegression
+from pathlib import Path
 
 
 def get_performance_2ab(
@@ -159,7 +160,7 @@ class HistoryBasedLogisticModel:
 class QlearningEstimator:
     """Estimate Q-learning parameters for a multi-armed bandit task"""
 
-    def __init__(self, mab: core.MultiArmedBandit):
+    def __init__(self, mab: core.MultiArmedBandit, model="vanilla"):
         assert mab.n_ports == 2, "This task has more than 2 ports"
         self.choices = mab.get_binarized_choices().astype(int)
         self.rewards = mab.rewards
@@ -168,11 +169,12 @@ class QlearningEstimator:
         self.alpha_c = None  # Learning rate for chosen action
         self.alpha_u = None  # Learning rate for unchosen action
         self.beta = None  # Inverse temperature parameter
+        self.model = model
 
     def print_params(self):
         print(f"alpha_c: {self.alpha_c}, alpha_u: {self.alpha_u}, beta: {self.beta}")
 
-    def compute_q_values(self, alpha_c, alpha_u):
+    def compute_q_values(self, params):
         """
         Compute Q-values for each action based on the choices and rewards.
 
@@ -181,11 +183,23 @@ class QlearningEstimator:
         Q = 0.5 * np.ones(2)  # Initialize Q-values for two actions
         q_values = []
 
+        if self.model == "vanilla":
+            alpha_c, alpha_u = params
+        elif self.model == "persev":
+            alpha_c, alpha_u, alpha_h = params
+            H = 0  # Initialize history for two actions
+            h_values = []
+        else:
+            raise ValueError(f"Unknown model: {self.model}")
+
         for choice, reward, is_start in zip(
             self.choices, self.rewards, self.is_session_start
         ):
             if is_start:
                 Q[:] = 0.5  # Reset Q-values at session start
+
+                if self.model == "persev":
+                    H = 0.5
 
             unchosen = 1 - choice
 
@@ -196,18 +210,35 @@ class QlearningEstimator:
             # Q[unchosen] += alpha_u * ((1 - reward) - Q[unchosen])
             # Q[unchosen] += alpha_u * (Q[choice] - reward)
 
+            if self.model == "persev":
+                H += alpha_h * (choice - H)
+                h_values.append(H.copy())
+
             q_values.append(Q.copy())
 
         q_values = np.clip(np.array(q_values), 0, 1)
-        return q_values
+        h_values = np.clip(np.array(h_values), 0, 1)
+
+        if self.model == "vanilla":
+            return q_values
+        elif self.model == "persev":
+            return q_values, h_values
 
     def log_likelihood(self, params):
-        alpha_c, alpha_u, beta = params
-        Q_values = self.compute_q_values(alpha_c, alpha_u)
+
         # Compute softmax probabilities
-        betaQ = beta * Q_values
-        # betaQ = np.clip(betaQ, -500, 500)  # Prevent overflow
-        exp_Q = np.exp(betaQ)
+        if self.model == "vanilla":
+            Q_values = self.compute_q_values(params[:-1])
+            beta = params[-1]
+            betaQ = beta * Q_values
+            exp_Q = np.exp(betaQ)
+
+        elif self.model == "persev":
+            Q_values, H_values = self.compute_q_values(params[:-2])
+            scaler, beta = params[-2], params[-1]
+            betaQscalerH = beta * Q_values + scaler * H_values.reshape(-1, 1)
+            exp_Q = np.exp(betaQscalerH)
+
         probs = exp_Q / np.sum(exp_Q, axis=1, keepdims=True)
         # Get the probability of the chosen action
         chosen_probs = probs[np.arange(len(self.choices)), self.choices]
