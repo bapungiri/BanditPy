@@ -76,27 +76,6 @@ def get_performance_2ab(
     return sess_div_perf_arr
 
 
-def get_port_bias_2ab(df, min_trials=250):
-
-    ntrials_by_session = get_trial_metrics(df)[0]
-
-    delta_prob = df["rewprobfull1"] - df["rewprobfull2"]
-    port_choice = df["port"].to_numpy()
-    port_choice[port_choice == 2] = -1
-    is_choice_high = df["is_choice_high"]
-    max_diff = 80
-    nbins = int(2 * max_diff / 10) + 1
-    bins = np.linspace(-max_diff, max_diff, nbins)
-
-    mean_choice = stats.binned_statistic(
-        delta_prob, port_choice, bins=bins, statistic="mean"
-    )[0]
-    bin_centers = bins[:-1] + 5
-    # mean_choice[bin_centers < 0] = -1 * mean_choice[bin_centers < 0]
-
-    return mean_choice, bin_centers
-
-
 class HistoryBasedLogisticModel:
     """Based on Miller et al. 2021, "From predictive models to cognitive models....." """
 
@@ -158,21 +137,44 @@ class HistoryBasedLogisticModel:
 
 
 class QlearningEstimator:
-    """Estimate Q-learning parameters for a multi-armed bandit task"""
+    """Estimate Q-learning parameters for a multi-armed bandit task
+
+    Vanilla Q-learning model:
+    Q[choice] += alpha_c * (reward - Q[choice])
+    Q[unchosen] += alpha_u * (reward - Q[choice])
+
+    Perseverance model:
+    In addition to the vanilla Q-learning update, we also added a persistence term to choose the same action as the previous one:
+    H = H + alpha_h * (choice - H)
+    """
 
     def __init__(self, mab: core.MultiArmedBandit, model="vanilla"):
+        """
+        Initialize the Q-learning estimator.
+
+        Parameters
+        ----------
+        mab : core.MultiArmedBandit
+            mab object containing the task data
+        model : str, ("vanilla", "persev")
+            which model to fit, by default "vanilla"
+        """
         assert mab.n_ports == 2, "This task has more than 2 ports"
         self.choices = mab.get_binarized_choices().astype(int)
         self.rewards = mab.rewards
         self.is_session_start = mab.is_session_start
         self.session_ids = mab.session_ids
-        self.alpha_c = None  # Learning rate for chosen action
-        self.alpha_u = None  # Learning rate for unchosen action
-        self.beta = None  # Inverse temperature parameter
+        self.estimated_params = None
         self.model = model
 
     def print_params(self):
-        print(f"alpha_c: {self.alpha_c}, alpha_u: {self.alpha_u}, beta: {self.beta}")
+        if self.model == "vanilla":
+            a, b, c = self.estimated_params.round(4)
+            print(f"alpha_c: {a}, alpha_u: {b}, beta: {c}")
+
+        elif self.model == "persev":
+            a, b, c, d, e = self.estimated_params.round(4)
+            print(f"alpha_c: {a}, alpha_u: {b},alpha_h: {c}, scaler: {d}, beta: {e}")
 
     def compute_q_values(self, params):
         """
@@ -217,7 +219,7 @@ class QlearningEstimator:
             q_values.append(Q.copy())
 
         q_values = np.clip(np.array(q_values), 0, 1)
-        h_values = np.clip(np.array(h_values), 0, 1)
+        h_values = np.array(h_values)
 
         if self.model == "vanilla":
             return q_values
@@ -251,14 +253,14 @@ class QlearningEstimator:
         ll = np.nansum(np.log(chosen_probs))
         return -ll  # For minimization
 
-    def fit(self, bounds, x0=None, method="diff", n_opts=1, n_cpu=1):
+    def fit(self, bounds, x0=None, method="diff_evolution", n_opts=1, n_cpu=1):
         # Optimize params using a bounded method
         if method == "bads":
             from pybads import BADS
 
             pass
 
-        elif method == "diff":
+        elif method == "diff_evolution":
             x_vec = np.zeros((n_opts, bounds.shape[0]))
             fval_vec = np.zeros(n_opts)
 
@@ -276,13 +278,14 @@ class QlearningEstimator:
                     disp=False,
                     polish=True,
                     init="latinhypercube",
+                    updating="deferred",
                     workers=n_cpu,
                 )
                 x_vec[opt_count] = result.x
                 fval_vec[opt_count] = result.fun
 
             idx_best = np.argmin(fval_vec)
-            self.alpha_c, self.alpha_u, self.beta = x_vec[idx_best]
+            self.estimated_params = x_vec[idx_best]
 
         else:
             result = minimize(

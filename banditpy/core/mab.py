@@ -197,7 +197,7 @@ class MultiArmedBandit(DataWriter):
     def trim_sessions(self, trial_start, trial_stop):
         pass
 
-    def keep_by_probdiff(probs, session_ids, min_diff=0.2):
+    def keep_by_deltaprob(probs, session_ids, min_diff=20):
         """
         Select sessions where the probability difference between two ports exceeds a threshold.
 
