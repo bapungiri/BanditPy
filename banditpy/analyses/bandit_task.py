@@ -79,15 +79,32 @@ def get_performance_2ab(
 class HistoryBasedLogisticModel:
     """Based on Miller et al. 2021, "From predictive models to cognitive models....." """
 
-    def __init__(self, mab: core.MultiArmedBandit, n_hist=5):
+    def __init__(self, mab: core.MultiArmedBandit, n_past=5):
         assert mab.n_ports == 2, "Only 2-armed bandit task is supported"
         self.choices, self.rewards = self._reformat_choices_rewards(
             mab.choices, mab.rewards
         )
         self.rewards = mab.rewards
-        self.n_hist = n_hist
+        self.n_past = n_past
         self.model = LogisticRegression(solver="lbfgs")
         self.feature_names = []
+
+    @property
+    def coef(self):
+        return self.model.coef_.squeeze().reshape(3, -1)
+
+    @property
+    def coef_names(self):
+        return ["reward seeking", "choice preservation", "effect of outcome"]
+
+    def get_coef_df(self, form="wide"):
+        """Get the coefficients and their names as a DataFrame."""
+        df = pd.DataFrame(data=self.coef.T, columns=self.coef_names)
+        df["past_id"] = np.arange(1, self.n_past + 1)
+
+        if form == "long":
+            df = df.melt(id_vars="past_id", var_name="coef_name", value_name="coef")
+        return df
 
     def _reformat_choices_rewards(self, choices, rewards):
         """
@@ -105,35 +122,32 @@ class HistoryBasedLogisticModel:
         """
         Prepare lagged features using sliding_window_view.
         """
-        # Generate sliding windows
-        C_windows = sliding_window_view(choices, window_shape=self.n_hist)[:-1]
-        R_windows = sliding_window_view(rewards, window_shape=self.n_hist)[:-1]
-        targets = choices[self.n_hist :]
+        # Generate sliding windows and flipping arrays from left to right so that the first column is the most recent choice
+        C_windows = sliding_window_view(choices, window_shape=self.n_past)[:-1][:, ::-1]
+        R_windows = sliding_window_view(rewards, window_shape=self.n_past)[:-1][:, ::-1]
+
+        actual_choices = choices[self.n_past :]
 
         # Interaction term
         CxR_windows = C_windows * R_windows
 
         # Stack features: shape (n_samples, n_lags * 3)
-        X = np.hstack([C_windows, R_windows, CxR_windows])
-        y = (targets == 1).astype(int)  # 1 for right, 0 for left
-
-        if not self.feature_names:
-            for k in range(1, self.n_hist + 1):
-                self.feature_names.extend([f"C_{k}", f"O_{k}", f"CxO_{k}"])
+        X = np.hstack([CxR_windows, C_windows, R_windows])
+        y = actual_choices.astype(int)  # -1 for left , 1 for right
 
         return X, y
 
-    def fit(self, choices, outcomes):
-        X, y = self._prepare_features(choices, outcomes)
+    def fit(self):
+        X, y = self._prepare_features(self.choices, self.rewards)
         self.model.fit(X, y)
         return self
 
-    def predict_proba(self, choices, outcomes):
-        X, _ = self._prepare_features(choices, outcomes)
-        return self.model.predict_proba(X)[:, 1]  # Prob of choosing right
+    # def predict_proba(self, choices, rewards):
+    #     X, _ = self._prepare_features(choices, rewards)
+    #     return self.model.predict_proba(X)[:, 1]  # Prob of choosing right
 
-    def get_coefficients(self):
-        return dict(zip(self.feature_names, self.model.coef_[0]))
+    def get_coef_dict(self):
+        return dict(zip(self.coef_names, self.coef))
 
 
 class QlearningEstimator:
