@@ -32,7 +32,7 @@ class MultiArmedBandit(DataWriter):
             session_ids
         ), "choices and session_ids must have same length"
 
-        self.probs = probs
+        self.probs = self._fix_probs(probs)
         self.choices = choices.astype(int)
         self.rewards = rewards.astype(int)
         self.starts = starts
@@ -81,6 +81,36 @@ class MultiArmedBandit(DataWriter):
         session_starts = np.clip(session_starts, 0, 1)
         session_starts[0] = 1  # First trial is always a start
         return session_starts
+
+    @property
+    def session_probs(self):
+        """Get the probabilities for each session.
+
+        Returns
+        -------
+        _type_
+            _description_
+        """
+        return np.array([self.probs[self.session_ids == s] for s in self.sessions])
+
+    def _fix_probs(self, probs):
+        """Fix the probs to be between 0 and 1. Most of our sessions have probabilities in 0-100 range.
+
+        Parameters
+        ----------
+        probs : _type_
+            _description_
+
+        Returns
+        -------
+        _type_
+            _description_
+        """
+        if probs.max() > 1:
+            probs = probs / 100
+
+        # probs = np.clip(probs, 0, 1)
+        return probs
 
     def get_binarized_choices(self):
         """Get binarized choices for the task
@@ -197,7 +227,7 @@ class MultiArmedBandit(DataWriter):
     def trim_sessions(self, trial_start, trial_stop):
         pass
 
-    def keep_by_deltaprob(probs, session_ids, min_diff=20):
+    def keep_by_deltaprob(self, probs, session_ids, min_diff=20):
         """
         Select sessions where the probability difference between two ports exceeds a threshold.
 
@@ -216,3 +246,39 @@ class MultiArmedBandit(DataWriter):
         valid_sessions = np.unique(session_ids[prob_diff > min_diff])
 
         return valid_sessions
+
+    def keep_sessions_by_id(self, ids):
+        """Keep only sessions with the specified IDs.
+
+        Parameters
+        ----------
+        ids : list of int
+            list of session IDs to keep
+
+        Returns
+        -------
+        MultiArmedBandit
+            A new MultiArmedBandit instance with filtered sessions.
+        """
+
+        mask = np.isin(self.session_ids, ids)
+
+        # Filter data by valid sessions
+        filtered_probs = self.probs[mask]
+        filtered_choices = self.choices[mask]
+        filtered_rewards = self.rewards[mask]
+        filtered_session_ids = self.session_ids[mask]
+        filtered_starts = self.starts[mask]
+        filtered_stops = self.stops[mask]
+        filtered_datetime = self.datetime[mask]
+
+        return MultiArmedBandit(
+            probs=filtered_probs,
+            choices=filtered_choices,
+            rewards=filtered_rewards,
+            session_ids=filtered_session_ids,
+            starts=filtered_starts,
+            stops=filtered_stops,
+            datetime=filtered_datetime,
+            metadata=None,
+        )
