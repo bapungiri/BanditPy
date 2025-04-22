@@ -328,7 +328,7 @@ class MultiArmedBandit(DataWriter):
 
         Returns
         -------
-        float
+        array-like
             The probability of switching between two ports in the specified session.
         """
 
