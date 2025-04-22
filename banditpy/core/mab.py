@@ -80,7 +80,7 @@ class MultiArmedBandit(DataWriter):
         session_starts = np.diff(self.session_ids, prepend=self.session_ids[0])
         session_starts = np.clip(session_starts, 0, 1)
         session_starts[0] = 1  # First trial is always a start
-        return session_starts
+        return session_starts.astype(bool)
 
     @property
     def session_probs(self):
@@ -282,3 +282,65 @@ class MultiArmedBandit(DataWriter):
             datetime=filtered_datetime,
             metadata=None,
         )
+
+    def get_switch_prob(self, session_id=None):
+        """Get the probability of switching between two ports in a session.
+
+        Parameters
+        ----------
+        session_id : int,array-like, optional
+            The session IDs to analyze. If None, all sessions are analyzed.
+
+        Returns
+        -------
+        float
+            The probability of switching between two ports in the specified session.
+        """
+
+        if session_id is None:
+            print("Calculating switch probability for all sessions")
+            session_id = self.sessions
+            # Ignore the first trial of each session
+            valid_indices = ~self.is_session_start
+
+            # Calculate switches (change in choices)
+            switches = np.diff(self.choices, prepend=self.choices[0]) != 0
+
+            # Calculate switching probability
+            switch_probability = np.mean(switches[valid_indices])
+
+        elif isinstance(session_id, (list, np.ndarray)):
+            print(f"Calculating switch probability for sessions: {session_id}")
+            mask = self.session_ids == session_id
+            choices = self.choices[mask]
+
+            # Calculate the number of switches and total trials in the session
+            switches = np.sum(np.diff(choices) != 0)
+            total_trials = len(choices) - 1
+
+            # Calculate the switch probability
+            switch_probability = switches / total_trials if total_trials > 0 else 0
+
+        return switch_probability
+
+    def get_switch_prob_by_trial(self):
+        """Get the probability of switching between ports as a function of trials.
+
+        Returns
+        -------
+        float
+            The probability of switching between two ports in the specified session.
+        """
+
+        # Calculate switches (change in choices)
+        switches = np.diff(self.choices, prepend=self.choices[0]) != 0
+
+        # convert to 2D array of shape (n_sessions, n_trials)
+        switches = pd.DataFrame(
+            np.split(switches, np.cumsum(self.ntrials_session)[:-1])
+        ).to_numpy()
+
+        # Calculate switch probability across session and ignore the first trial
+        switch_prob = np.nanmean(switches, axis=0)[1:]
+
+        return switch_prob
