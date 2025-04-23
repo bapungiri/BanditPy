@@ -1,6 +1,7 @@
 import numpy as np
 from neuropy.core import DataWriter
 from scipy import stats
+from scipy.ndimage import gaussian_filter1d
 import pandas as pd
 
 
@@ -50,7 +51,7 @@ class MultiArmedBandit(DataWriter):
 
     @property
     def is_choice_high(self):
-        return np.max(self.probs, axis=1) == self.choices
+        return (np.argmax(self.probs, axis=1) + 1) == self.choices
 
     @property
     def mean_ntrials(self):
@@ -63,6 +64,10 @@ class MultiArmedBandit(DataWriter):
     @property
     def max_ntrials(self):
         return np.max(self.ntrials_session)
+
+    @property
+    def n_sessions(self):
+        return len(self.sessions)
 
     def from_csv(self):
         return None
@@ -344,3 +349,57 @@ class MultiArmedBandit(DataWriter):
         switch_prob = np.nanmean(switches, axis=0)[1:]
 
         return switch_prob
+
+    def get_performance(self, bin_size=None, as_df=False):
+        """Get performance on two armed bandit task
+
+        Parameters
+        ----------
+        bin_size : int, optional
+            no.of sessions over which performance is calculated, by default 80
+        roll_step : int, optional
+            _description_, by default 40
+        delta_prob : _type_, optional
+            _description_, by default None
+
+        Returns
+        -------
+        _type_
+            _description_
+        """
+
+        assert self.n_ports == 2, "This method is only implemented for 2AB task"
+
+        # converting into n_sessions x n_trials dataframe and then into numpy array, converting to dataframe automatically handles the NaN values for sessions which has fewer trials
+        is_choice_high_per_session = pd.DataFrame(
+            np.split(
+                self.is_choice_high.astype(int), np.cumsum(self.ntrials_session)[:-1]
+            )
+        ).to_numpy()
+
+        assert (
+            is_choice_high_per_session.shape[0] == self.n_sessions
+        ), f"Number of sessions not matching"
+
+        if bin_size is not None:
+
+            sess_div_perf = np.array_split(
+                is_choice_high_per_session, self.n_sessions // bin_size, axis=0
+            )
+            sess_div_perf = np.array([np.nanmean(_, axis=0) for _ in sess_div_perf])
+        else:
+            sess_div_perf = np.nanmean(is_choice_high_per_session, axis=0)
+
+        return sess_div_perf
+
+    def get_cummulative_reward(self):
+        """Get the cumulative rewards for each session.
+
+        Returns
+        -------
+        array-like
+            The cumulative rewards for each session.
+        """
+        return np.array(
+            [np.cumsum(session_rewards) for session_rewards in self.rewards]
+        )
