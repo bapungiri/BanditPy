@@ -173,7 +173,7 @@ class MultiArmedBandit(DataWriter):
             metadata=None,
         )
 
-    def keep_by_trials(self, min_trials=100, clip_max=None):
+    def filter_by_trials(self, min_trials=100, clip_max=None):
         """Keep only sessions with more than min_trials and optionally clip to max trials.
 
         Parameters
@@ -232,27 +232,33 @@ class MultiArmedBandit(DataWriter):
     def trim_sessions(self, trial_start, trial_stop):
         pass
 
-    def keep_by_deltaprob(self, probs, session_ids, min_diff=20):
-        """
-        Select sessions where the probability difference between two ports exceeds a threshold.
+    def filter_by_deltaprob(self, delta_min, delta_max=None):
+        """Keep only sessions with delta probabilities between min and max.
 
-        Parameters:
-            probs (array-like): Array of shape (n_trials, 2) containing probabilities for two ports.
-            session_ids (array-like): Array of session IDs corresponding to each trial.
-            min_diff (float): Minimum probability difference threshold. Default is 0.2.
+        Note: Only implemented for 2AB task
 
-        Returns:
-            array-like: Array of session IDs that meet the criteria.
+        Parameters
+        ----------
+        min : float
+            Minimum delta probability to keep
+        max : float, optional
+            Maximum delta probability to keep, by default None
+
+        Returns
+        -------
+        Multi
         """
+        assert self.n_ports == 2, "This method is only implemented for 2AB task"
+
         # Calculate the absolute difference between probabilities of the two ports
-        prob_diff = np.abs(probs[:, 0] - probs[:, 1])
+        prob_diff = np.abs(np.diff(self.probs, axis=1).flatten())
 
         # Identify sessions where the probability difference exceeds the threshold
-        valid_sessions = np.unique(session_ids[prob_diff > min_diff])
+        valid_sessions = np.unique(self.session_ids[prob_diff >= delta_min])
 
-        return valid_sessions
+        return self.filter_by_session_id(valid_sessions)
 
-    def keep_sessions_by_id(self, ids):
+    def filter_by_session_id(self, ids):
         """Keep only sessions with the specified IDs.
 
         Parameters
