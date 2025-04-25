@@ -3,6 +3,7 @@ from neuropy.core import DataWriter
 from scipy import stats
 from scipy.ndimage import gaussian_filter1d
 import pandas as pd
+from numpy.lib.stride_tricks import sliding_window_view
 
 
 class MultiArmedBandit(DataWriter):
@@ -250,11 +251,17 @@ class MultiArmedBandit(DataWriter):
         """
         assert self.n_ports == 2, "This method is only implemented for 2AB task"
 
+        if delta_max is not None:
+            assert delta_min < delta_max, "min should be less than max"
+        else:
+            delta_max = 1
+
         # Calculate the absolute difference between probabilities of the two ports
         prob_diff = np.abs(np.diff(self.probs, axis=1).flatten())
 
         # Identify sessions where the probability difference exceeds the threshold
-        valid_sessions = np.unique(self.session_ids[prob_diff >= delta_min])
+        delta_bool = (prob_diff >= delta_min) & (prob_diff <= delta_max)
+        valid_sessions = np.unique(self.session_ids[delta_bool])
 
         return self.filter_by_session_id(valid_sessions)
 
@@ -355,6 +362,63 @@ class MultiArmedBandit(DataWriter):
         switch_prob = np.nanmean(switches, axis=0)[1:]
 
         return switch_prob
+
+    def get_switch_prob_by_history(self, n_past):
+        """Get the probability of switching between ports as a function of history.
+
+        References
+        ----------
+        Beron et al. 2022
+
+        Parameters
+        ----------
+        n_past : int, optional
+            History length
+
+        Returns
+        -------
+        array
+            The probability of switching on next action. If your n_past is 3, then probability of switching on next choice given unique sequence of 3 past actions/rewards.
+        array_like
+            Unique sequences.
+
+
+        """
+
+        assert self.n_ports == 2, "Only implemented for 2AB task"
+        # Calculate switches (change in choices)
+        choices = self.choices.copy()
+        rewards = self.rewards.copy()
+        rewards[rewards == 0] = -1
+
+        def merge_symmetry(arr):
+            if arr[0] == 2:
+                new_arr = arr.copy()
+                indx1 = np.where(arr == 1)[0]
+                indx2 = np.where(arr == 2)[0]
+                new_arr[indx1] = 2
+                new_arr[indx2] = 1
+                return new_arr
+            else:
+                return arr
+
+        # Converting to history view slices
+        choices_history = sliding_window_view(choices, n_past)[:-1]
+        choices_history = np.array([merge_symmetry(_) for _ in choices_history])
+        rewards_history = sliding_window_view(rewards, n_past)[:-1]
+
+        # Encoding reward in choices
+        choices_x_reward = choices_history * rewards_history
+
+        switches = (np.diff(choices, prepend=choices[0]) != 0)[n_past : len(choices)]
+
+        unq_history = np.unique(choices_x_reward, axis=0)
+        unq_indx = [
+            np.where(np.all(choices_x_reward == _, axis=1))[0] for _ in unq_history
+        ]
+        switch_prob = np.array([np.mean(switches[_]) for _ in unq_indx])
+
+        return switch_prob, unq_history
 
     def get_performance(self, bin_size=None, as_df=False):
         """Get performance on two armed bandit task
