@@ -12,9 +12,6 @@ from sklearn.linear_model import LogisticRegression
 from pathlib import Path
 
 
-
-
-
 class HistoryBasedLogisticModel:
     """Based on Miller et al. 2021, "From predictive models to cognitive models....." """
 
