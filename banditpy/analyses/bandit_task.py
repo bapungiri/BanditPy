@@ -10,6 +10,7 @@ import multiprocessing
 from numpy.lib.stride_tricks import sliding_window_view
 from sklearn.linear_model import LogisticRegression
 from pathlib import Path
+from functools import partial
 
 
 class HistoryBasedLogisticModel:
@@ -98,7 +99,9 @@ class QlearningEstimator:
     H = H + alpha_h * (choice - H)
     """
 
-    def __init__(self, mab: core.MultiArmedBandit, model="vanilla"):
+    def __init__(
+        self, mab: core.MultiArmedBandit, bounds, model="vanilla", n_optimize=1, n_cpu=1
+    ):
         """
         Initialize the Q-learning estimator.
 
@@ -110,12 +113,42 @@ class QlearningEstimator:
             which model to fit, by default "vanilla"
         """
         assert mab.n_ports == 2, "This task has more than 2 ports"
+
+        if model == "vanilla":
+            self.n_params = 3
+        elif model == "persev":
+            self.n_params = 5
+        else:
+            raise ValueError(f"Unknown model: {self.model}")
+
         self.choices = mab.get_binarized_choices().astype(int)
         self.rewards = mab.rewards
         self.is_session_start = mab.is_session_start
         self.session_ids = mab.session_ids
         self.estimated_params = None
         self.model = model
+        self.n_cpu = n_cpu
+        self.n_optimize = n_optimize
+
+        if bounds is not None:
+            self.optimize_func = partial(
+                differential_evolution,
+                bounds=bounds,
+                strategy="best1bin",
+                maxiter=1000,
+                popsize=15,
+                tol=0.01,
+                mutation=(0.5, 1),
+                recombination=0.7,
+                seed=None,
+                disp=False,
+                polish=True,
+                init="latinhypercube",
+                updating="deferred",
+                workers=n_cpu,
+            )
+        else:
+            self.optimize_func = None
 
     def print_params(self):
         if self.model == "vanilla":
@@ -155,7 +188,7 @@ class QlearningEstimator:
 
             unchosen = 1 - choice
 
-            # Q-learning update
+            # ===== Q-learning update ============
             Q[choice] += alpha_c * (reward - Q[choice])
             Q[unchosen] += alpha_u * (reward - Q[choice])
             # Q[unchosen] += alpha_u * (reward - Q[unchosen])
@@ -203,46 +236,15 @@ class QlearningEstimator:
         ll = np.nansum(np.log(chosen_probs))
         return -ll  # For minimization
 
-    def fit(self, bounds, x0=None, method="diff_evolution", n_opts=1, n_cpu=1):
+    def fit(self):
         # Optimize params using a bounded method
-        if method == "bads":
-            from pybads import BADS
+        x_vec = np.zeros((self.n_optimize, self.n_params))
+        fval_vec = np.zeros(self.n_optimize)
 
-            pass
+        for opt_i in range(self.n_optimize):
+            result = self.optimize_func(self.log_likelihood)
+            x_vec[opt_i] = result.x
+            fval_vec[opt_i] = result.fun
 
-        elif method == "diff_evolution":
-            x_vec = np.zeros((n_opts, bounds.shape[0]))
-            fval_vec = np.zeros(n_opts)
-
-            for opt_count in range(n_opts):
-                result = differential_evolution(
-                    self.log_likelihood,
-                    bounds=bounds,
-                    strategy="best1bin",
-                    maxiter=1000,
-                    popsize=15,
-                    tol=0.01,
-                    mutation=(0.5, 1),
-                    recombination=0.7,
-                    seed=None,
-                    disp=False,
-                    polish=True,
-                    init="latinhypercube",
-                    updating="deferred",
-                    workers=n_cpu,
-                )
-                x_vec[opt_count] = result.x
-                fval_vec[opt_count] = result.fun
-
-            idx_best = np.argmin(fval_vec)
-            self.estimated_params = x_vec[idx_best]
-
-        else:
-            result = minimize(
-                self.log_likelihood,
-                x0=[0.5, -0.5, 1],
-                bounds=[(0, 1), (0, 1), (0, 10)],
-                method="L-BFGS-B",
-            )
-
-            self.alpha_c, self.alpha_u, self.beta = result.x
+        idx_best = np.argmin(fval_vec)
+        self.estimated_params = x_vec[idx_best]
