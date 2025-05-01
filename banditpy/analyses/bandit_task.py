@@ -159,7 +159,7 @@ class QlearningEstimator:
             a, b, c, d, e = self.estimated_params.round(4)
             print(f"alpha_c: {a}, alpha_u: {b},alpha_h: {c}, scaler: {d}, beta: {e}")
 
-    def compute_q_values(self, params):
+    def compute_q_values(self, alpha_params):
         """
         Compute Q-values for each action based on the choices and rewards.
 
@@ -169,9 +169,9 @@ class QlearningEstimator:
         q_values = []
 
         if self.model == "vanilla":
-            alpha_c, alpha_u = params
+            alpha_c, alpha_u = alpha_params
         elif self.model == "persev":
-            alpha_c, alpha_u, alpha_h = params
+            alpha_c, alpha_u, alpha_h = alpha_params
             H = 0  # Initialize history for two actions
             h_values = []
         else:
@@ -209,8 +209,7 @@ class QlearningEstimator:
         elif self.model == "persev":
             return q_values, h_values
 
-    def log_likelihood(self, params):
-
+    def compute_probabilites(self, params):
         # Compute softmax probabilities
         if self.model == "vanilla":
             Q_values = self.compute_q_values(params[:-1])
@@ -225,6 +224,13 @@ class QlearningEstimator:
             exp_Q = np.exp(betaQscalerH)
 
         probs = exp_Q / np.sum(exp_Q, axis=1, keepdims=True)
+
+        return probs
+
+    def log_likelihood(self, params):
+
+        probs = self.compute_probabilites(params)
+
         # Get the probability of the chosen action
         chosen_probs = probs[np.arange(len(self.choices)), self.choices]
 
@@ -248,3 +254,31 @@ class QlearningEstimator:
 
         idx_best = np.argmin(fval_vec)
         self.estimated_params = x_vec[idx_best]
+
+    def predict_choices(self, params, deterministic=True):
+        """
+        Predict choices using the estimated parameters.
+
+        Parameters
+        ----------
+        deterministic : bool, optional (default=True)
+            If True, chooses the action with the highest probability at each trial (argmax).
+            If False, samples actions probabilistically from the softmax distribution.
+
+        Returns
+        -------
+        np.ndarray
+            Array of predicted choices (0 or 1) for each trial.
+        """
+
+        probs = self.compute_probabilites(params)
+
+        if deterministic:
+            predicted_choices = np.argmax(probs, axis=1)
+        else:
+            # Sample from probabilities
+            predicted_choices = np.array(
+                [np.random.choice([0, 1], p=prob) for prob in probs]
+            )
+
+        return predicted_choices
