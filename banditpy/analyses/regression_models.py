@@ -1,16 +1,10 @@
 import numpy as np
 import pandas as pd
 from .. import core
-from scipy.optimize import minimize, differential_evolution
-from joblib import Parallel, delayed
-
-from pathos.multiprocessing import ProcessingPool as Pool
-import multiprocessing
 
 from numpy.lib.stride_tricks import sliding_window_view
 from sklearn.linear_model import LogisticRegression
 from pathlib import Path
-from functools import partial
 
 
 class HistoryBasedLogisticModel:
@@ -85,6 +79,3 @@ class HistoryBasedLogisticModel:
 
     def get_coef_dict(self):
         return dict(zip(self.coef_names, self.coef))
-
-
-

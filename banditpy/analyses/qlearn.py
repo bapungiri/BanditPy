@@ -19,7 +19,7 @@ class QlearningEstimator:
     """
 
     def __init__(
-        self, mab: core.MultiArmedBandit, bounds, model="vanilla", n_optimize=1, n_cpu=1
+        self, mab: core.MultiArmedBandit, model="vanilla", n_optimize=1, n_cpu=1
     ):
         """
         Initialize the Q-learning estimator.
@@ -49,25 +49,25 @@ class QlearningEstimator:
         self.n_cpu = n_cpu
         self.n_optimize = n_optimize
 
-        if bounds is not None:
-            self.optimize_func = partial(
-                differential_evolution,
-                bounds=bounds,
-                strategy="best1bin",
-                maxiter=1000,
-                popsize=15,
-                tol=0.01,
-                mutation=(0.5, 1),
-                recombination=0.7,
-                seed=None,
-                disp=False,
-                polish=True,
-                init="latinhypercube",
-                updating="deferred",
-                workers=n_cpu,
-            )
-        else:
-            self.optimize_func = None
+        # if bounds is not None:
+        #     self.optimize_func = partial(
+        #         differential_evolution,
+        #         bounds=bounds,
+        #         strategy="best1bin",
+        #         maxiter=1000,
+        #         popsize=15,
+        #         tol=0.01,
+        #         mutation=(0.5, 1),
+        #         recombination=0.7,
+        #         seed=None,
+        #         disp=False,
+        #         polish=True,
+        #         init="latinhypercube",
+        #         updating="deferred",
+        #         workers=n_cpu,
+        #     )
+        # else:
+        #     self.optimize_func = None
 
     def print_params(self):
         if self.model == "vanilla":
@@ -103,7 +103,7 @@ class QlearningEstimator:
                 Q[:] = 0.5  # Reset Q-values at session start
 
                 if self.model == "persev":
-                    H = 0.5
+                    H = 0
 
             # ----- Q-learning update ---------
 
@@ -117,8 +117,8 @@ class QlearningEstimator:
 
             # For choices coded as 1 and 2
             unchosen = 3 - choice
-            Q[choice - 1] += alpha_c * (reward - Q[choice])
-            Q[unchosen - 1] += alpha_u * (reward - Q[choice])
+            Q[choice - 1] += alpha_c * (reward - Q[choice - 1])
+            Q[unchosen - 1] += alpha_u * (reward - Q[choice - 1])
 
             if self.model == "persev":
                 H += alpha_h * (choice - H)
@@ -157,7 +157,7 @@ class QlearningEstimator:
         probs = self.compute_probabilites(params)
 
         # Get the probability of the chosen action
-        chosen_probs = probs[np.arange(len(self.choices)), self.choices]
+        chosen_probs = probs[np.arange(len(self.choices)), self.choices - 1]
 
         # Numerical stability
         eps = 1e-9
@@ -167,13 +167,29 @@ class QlearningEstimator:
         ll = np.nansum(np.log(chosen_probs))
         return -ll  # For minimization
 
-    def fit(self):
+    def fit(self, bounds, n_optimize):
         # Optimize params using a bounded method
-        x_vec = np.zeros((self.n_optimize, self.n_params))
-        fval_vec = np.zeros(self.n_optimize)
+        x_vec = np.zeros((n_optimize, self.n_params))
+        fval_vec = np.zeros(n_optimize)
 
         for opt_i in range(self.n_optimize):
-            result = self.optimize_func(self.log_likelihood)
+            # result = self.optimize_func(self.log_likelihood)
+            result = differential_evolution(
+                self.log_likelihood,
+                bounds=bounds,
+                strategy="best1bin",
+                maxiter=1000,
+                popsize=15,
+                tol=0.01,
+                mutation=(0.5, 1),
+                recombination=0.7,
+                seed=None,
+                disp=False,
+                polish=True,
+                init="latinhypercube",
+                updating="deferred",
+                workers=self.n_cpu,
+            )
             x_vec[opt_i] = result.x
             fval_vec[opt_i] = result.fun
 
