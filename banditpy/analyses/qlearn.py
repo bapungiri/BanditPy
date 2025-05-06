@@ -40,7 +40,7 @@ class QlearningEstimator:
         else:
             raise ValueError(f"Unknown model: {self.model}")
 
-        self.choices = mab.get_binarized_choices().astype(int)
+        self.choices = mab.choices
         self.rewards = mab.rewards
         self.is_session_start = mab.is_session_start
         self.session_ids = mab.session_ids
@@ -105,14 +105,20 @@ class QlearningEstimator:
                 if self.model == "persev":
                     H = 0.5
 
-            unchosen = 1 - choice
+            # ----- Q-learning update ---------
 
-            # ===== Q-learning update ============
-            Q[choice] += alpha_c * (reward - Q[choice])
-            Q[unchosen] += alpha_u * (reward - Q[choice])
+            ## For choices coded as 0 and 1
+            # unchosen = 1 - choice
+            # Q[choice] += alpha_c * (reward - Q[choice])
+            # Q[unchosen] += alpha_u * (reward - Q[choice])
             # Q[unchosen] += alpha_u * (reward - Q[unchosen])
             # Q[unchosen] += alpha_u * ((1 - reward) - Q[unchosen])
             # Q[unchosen] += alpha_u * (Q[choice] - reward)
+
+            # For choices coded as 1 and 2
+            unchosen = 3 - choice
+            Q[choice - 1] += alpha_c * (reward - Q[choice])
+            Q[unchosen - 1] += alpha_u * (reward - Q[choice])
 
             if self.model == "persev":
                 H += alpha_h * (choice - H)
@@ -187,17 +193,17 @@ class QlearningEstimator:
         Returns
         -------
         np.ndarray
-            Array of predicted choices (0 or 1) for each trial.
+            Array of predicted choices (1 or 2) for each trial.
         """
 
         probs = self.compute_probabilites(params)
 
         if deterministic:
-            predicted_choices = np.argmax(probs, axis=1)
+            predicted_choices = np.argmax(probs, axis=1) + 1
         else:
             # Sample from probabilities
             predicted_choices = np.array(
-                [np.random.choice([0, 1], p=prob) for prob in probs]
+                [np.random.choice([1, 2], p=prob) for prob in probs]
             )
 
         return predicted_choices

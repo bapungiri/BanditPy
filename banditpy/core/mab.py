@@ -35,7 +35,7 @@ class MultiArmedBandit(DataWriter):
         ), "choices and session_ids must have same length"
 
         self.probs = self._fix_probs(probs)
-        self.choices = choices.astype(int)
+        self.choices = self._fix_choices(choices.astype(int))
         self.rewards = rewards.astype(int)
         self.starts = starts
         self.stops = stops
@@ -118,15 +118,33 @@ class MultiArmedBandit(DataWriter):
         # probs = np.clip(probs, 0, 1)
         return probs
 
-    def get_binarized_choices(self):
-        """Get binarized choices for the task
+    def _fix_choices(self, choices):
+        """Fix choices to start from 1,2.....
+
+        Parameters
+        ----------
+        probs : _type_
+            _description_
 
         Returns
         -------
         _type_
             _description_
         """
-        return np.where(self.choices == 1, 1, 0)
+        choices = choices - choices.min() + 1
+
+        return choices
+
+    def get_binarized_choices(self):
+        """get choices coded as 0 and 1
+
+        Returns
+        -------
+        _type_
+            _description_
+        """
+        assert self.n_ports == 2, "Only implemented for 2AB task"
+        return np.where(self.choices == 2, 1, 0)  # Port 1: 0 and Port 2: 1
 
     def get_port_bias_2ab(df, min_trials=250):
 
