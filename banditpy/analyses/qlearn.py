@@ -3,8 +3,6 @@ import pandas as pd
 from .. import core
 from scipy.optimize import differential_evolution
 
-from functools import partial
-
 
 class QlearningEstimator:
     """Estimate Q-learning parameters for a multi-armed bandit task
@@ -18,9 +16,7 @@ class QlearningEstimator:
     H = H + alpha_h * (choice - H)
     """
 
-    def __init__(
-        self, mab: core.MultiArmedBandit, model="vanilla", n_optimize=1, n_cpu=1
-    ):
+    def __init__(self, mab: core.MultiArmedBandit, model="vanilla", n_cpu=1):
         """
         Initialize the Q-learning estimator.
 
@@ -47,27 +43,6 @@ class QlearningEstimator:
         self.estimated_params = None
         self.model = model
         self.n_cpu = n_cpu
-        self.n_optimize = n_optimize
-
-        # if bounds is not None:
-        #     self.optimize_func = partial(
-        #         differential_evolution,
-        #         bounds=bounds,
-        #         strategy="best1bin",
-        #         maxiter=1000,
-        #         popsize=15,
-        #         tol=0.01,
-        #         mutation=(0.5, 1),
-        #         recombination=0.7,
-        #         seed=None,
-        #         disp=False,
-        #         polish=True,
-        #         init="latinhypercube",
-        #         updating="deferred",
-        #         workers=n_cpu,
-        #     )
-        # else:
-        #     self.optimize_func = None
 
     def print_params(self):
         if self.model == "vanilla":
@@ -127,12 +102,11 @@ class QlearningEstimator:
             q_values.append(Q.copy())
 
         q_values = np.clip(np.array(q_values), 0, 1)
-        h_values = np.array(h_values)
 
         if self.model == "vanilla":
             return q_values
         elif self.model == "persev":
-            return q_values, h_values
+            return q_values, np.array(h_values)
 
     def compute_probabilites(self, params):
         # Compute softmax probabilities
@@ -172,7 +146,7 @@ class QlearningEstimator:
         x_vec = np.zeros((n_optimize, self.n_params))
         fval_vec = np.zeros(n_optimize)
 
-        for opt_i in range(self.n_optimize):
+        for opt_i in range(n_optimize):
             # result = self.optimize_func(self.log_likelihood)
             result = differential_evolution(
                 self.log_likelihood,
