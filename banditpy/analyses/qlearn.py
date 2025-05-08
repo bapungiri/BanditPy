@@ -66,7 +66,7 @@ class QlearningEstimator:
             alpha_c, alpha_u = alpha_params
         elif self.model == "persev":
             alpha_c, alpha_u, alpha_h = alpha_params
-            H = 0  # Initialize history for two actions
+            H = 1.5  # Initialize history for two actions
             h_values = []
         else:
             raise ValueError(f"Unknown model: {self.model}")
@@ -78,7 +78,7 @@ class QlearningEstimator:
                 Q[:] = 0.5  # Reset Q-values at session start
 
                 if self.model == "persev":
-                    H = 0
+                    H = 1.5  # Value mid way of choices 1 and 2
 
             # ----- Q-learning update ---------
 
