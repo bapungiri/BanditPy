@@ -6,7 +6,12 @@ import pandas as pd
 from numpy.lib.stride_tricks import sliding_window_view
 
 
-class MultiArmedBandit(DataWriter):
+class BanditTask(DataWriter):
+    def __init__(self, metadata=None):
+        super().__init__(metadata)
+
+
+class TwoArmedBandit(DataWriter):
     """
     A class to hold a multi-armed bandit task data.
 
