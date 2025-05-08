@@ -1,1 +1,1 @@
-from .mab import MultiArmedBandit
+from .mab import TwoArmedBandit
