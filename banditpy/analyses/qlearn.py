@@ -16,7 +16,7 @@ class QlearningEstimator:
     H = H + alpha_h * (choice - H)
     """
 
-    def __init__(self, mab: core.MultiArmedBandit, model="vanilla", n_cpu=1):
+    def __init__(self, mab: core.TwoArmedBandit, model="vanilla", n_cpu=1):
         """
         Initialize the Q-learning estimator.
 
@@ -170,15 +170,15 @@ class QlearningEstimator:
         idx_best = np.argmin(fval_vec)
         self.estimated_params = x_vec[idx_best]
 
-    def predict_choices(self, params, deterministic=True):
+    def predict_choices(self, params, stochastic=True):
         """
         Predict choices using the estimated parameters.
 
         Parameters
         ----------
-        deterministic : bool, optional (default=True)
-            If True, chooses the action with the highest probability at each trial (argmax).
-            If False, samples actions probabilistically from the softmax distribution.
+        stochastic: bool, optional (default=True)
+            If True, samples actions probabilistically from the softmax distribution.
+            If False, chooses the action with the highest probability at each trial (argmax).
 
         Returns
         -------
@@ -188,12 +188,12 @@ class QlearningEstimator:
 
         probs = self.compute_probabilites(params)
 
-        if deterministic:
-            predicted_choices = np.argmax(probs, axis=1) + 1
-        else:
+        if stochastic:
             # Sample from probabilities
             predicted_choices = np.array(
                 [np.random.choice([1, 2], p=prob) for prob in probs]
             )
+        else:
+            predicted_choices = np.argmax(probs, axis=1) + 1
 
         return predicted_choices
