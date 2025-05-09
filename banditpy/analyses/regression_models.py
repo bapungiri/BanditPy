@@ -10,7 +10,7 @@ from pathlib import Path
 class HistoryBasedLogisticModel:
     """Based on Miller et al. 2021, "From predictive models to cognitive models....." """
 
-    def __init__(self, mab: core.MultiArmedBandit, n_past=5):
+    def __init__(self, mab: core.TwoArmedBandit, n_past=5):
         assert mab.n_ports == 2, "Only 2-armed bandit task is supported"
         self.choices, self.rewards = self._reformat_choices_rewards(
             mab.choices, mab.rewards
@@ -76,6 +76,19 @@ class HistoryBasedLogisticModel:
     # def predict_proba(self, choices, rewards):
     #     X, _ = self._prepare_features(choices, rewards)
     #     return self.model.predict_proba(X)[:, 1]  # Prob of choosing right
+
+    def predict(self, stochastic=True):
+        X, _ = self._prepare_features(self.choices, self.rewards)
+
+        if stochastic:
+            probs = self.model.predict_proba(X)
+            predicted_choices = np.array([np.random.choice([1, 2], p=p) for p in probs])
+        else:
+            predicted_choices = self.model.predict(X)
+            predicted_choices[predicted_choices == 1] = 2
+            predicted_choices[predicted_choices == -1] = 1
+
+        return predicted_choices
 
     def get_coef_dict(self):
         return dict(zip(self.coef_names, self.coef))
