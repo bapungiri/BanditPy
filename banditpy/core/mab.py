@@ -7,57 +7,56 @@ from numpy.lib.stride_tricks import sliding_window_view
 
 
 class BanditTask(DataWriter):
-    def __init__(self, metadata=None):
-        super().__init__(metadata)
-
-
-class TwoArmedBandit(DataWriter):
-    """
-    A class to hold a multi-armed bandit task data.
-
-    """
+    """Base class for bandit tasks"""
 
     def __init__(
         self,
-        probs,  # array size n_trials x n_ports
-        choices,  # array size n_trials
-        rewards,  # array size n_trials
+        probs,
+        choices,
+        rewards,
         session_ids,
-        starts,
-        stops,
-        datetime,
+        starts=None,
+        stops=None,
+        datetime=None,
         metadata=None,
     ):
         super().__init__(metadata=metadata)
-        assert probs.ndim == 2, "probs must be 2D array"
+        assert probs.ndim == 2, "probs must be (n_trials, n_arms)"
+        assert probs.shape[0] > probs.shape[1], "n_arms can't be greater than n_trials"
         assert (
-            probs.shape[1] == 2
-        ), "probs must be 2D array with 2 columns, This is implemented for 2AB task only"
-        assert probs.shape[0] == len(choices), "probs and choices must have same length"
-        assert len(choices) == len(rewards), "choices and rewards must have same length"
-        assert len(rewards) == len(
-            session_ids
-        ), "choices and session_ids must have same length"
+            probs.shape[0] == len(choices) == len(rewards) == len(session_ids)
+        ), "Mismatch in trials length"
 
         self.probs = self._fix_probs(probs)
         self.choices = self._fix_choices(choices.astype(int))
         self.rewards = rewards.astype(int)
-        self.starts = starts
-        self.stops = stops
         self.session_ids = session_ids
+
+        if starts is not None:
+            assert starts.shape[0] == probs.shape[0], "starts should be of same length"
+            self.starts = starts
+
+        if stops is not None:
+            assert stops.shape[0] == probs.shape[0], "stops should be of same length"
+            self.stops = stops
+
         self.datetime = datetime
 
         self.sessions, self.ntrials_session = np.unique(
             self.session_ids, return_counts=True
         )
 
+    @staticmethod
+    def _fix_probs(probs):
+        return probs / 100 if probs.max() > 1 else probs
+
+    @staticmethod
+    def _fix_choices(choices):
+        return choices - choices.min() + 1
+
     @property
     def n_ports(self):
         return self.probs.shape[1]
-
-    @property
-    def is_choice_high(self):
-        return (np.argmax(self.probs, axis=1) + 1) == self.choices
 
     @property
     def mean_ntrials(self):
@@ -75,8 +74,82 @@ class TwoArmedBandit(DataWriter):
     def n_sessions(self):
         return len(self.sessions)
 
-    def from_csv(self):
-        return None
+    @property
+    def is_session_start(self):
+        session_starts = np.diff(self.session_ids, prepend=self.session_ids[0])
+        session_starts = np.clip(session_starts, 0, 1)
+        session_starts[0] = 1
+        return session_starts.astype(bool)
+
+    def filter_by_trials(self, min_trials=100, clip_max=None):
+        valid_sessions = self.sessions[self.ntrials_session >= min_trials]
+        mask = np.isin(self.session_ids, valid_sessions)
+
+        if clip_max is not None:
+            clipped_mask = []
+            for session in valid_sessions:
+                session_mask = self.session_ids == session
+                session_indices = np.where(session_mask)[0][:clip_max]
+                clipped_mask.extend(session_indices)
+            mask = np.zeros_like(self.session_ids, dtype=bool)
+            mask[clipped_mask] = True
+
+        return self._filtered(mask)
+
+    def filter_by_session_id(self, ids):
+        mask = np.isin(self.session_ids, ids)
+        return self._filtered(mask)
+
+    def _filtered(self, mask):
+        """Return a new instance of the same class with filtered data."""
+        return self.__class__(
+            probs=self.probs[mask],
+            choices=self.choices[mask],
+            rewards=self.rewards[mask],
+            session_ids=self.session_ids[mask],
+            starts=None if self.starts is None else self.starts[mask],
+            stops=None if self.stops is None else self.stops[mask],
+            datetime=None if self.datetime is None else self.datetime[mask],
+            metadata=self.metadata,
+        )
+
+    @classmethod
+    def from_csv(cls):
+        pass
+
+
+class TwoArmedBandit(BanditTask):
+    """
+    A class to hold a multi-armed bandit task data.
+    """
+
+    def __init__(
+        self,
+        probs,
+        choices,
+        rewards,
+        session_ids,
+        starts=None,
+        stops=None,
+        datetime=None,
+        metadata=None,
+    ):
+
+        super().__init__(
+            probs=probs,
+            choices=choices,
+            rewards=rewards,
+            session_ids=session_ids,
+            starts=starts,
+            stops=stops,
+            datetime=datetime,
+            metadata=metadata,
+        )
+        assert self.n_ports == 2, "TwoArmedBandit requires exactly 2 arms"
+
+    @property
+    def is_choice_high(self):
+        return (np.argmax(self.probs, axis=1) + 1) == self.choices
 
     @property
     def probs_corr(self):
@@ -85,13 +158,6 @@ class TwoArmedBandit(DataWriter):
     @property
     def is_structured(self):
         return np.abs(self.probs_corr) > 0.9
-
-    @property
-    def is_session_start(self):
-        session_starts = np.diff(self.session_ids, prepend=self.session_ids[0])
-        session_starts = np.clip(session_starts, 0, 1)
-        session_starts[0] = 1  # First trial is always a start
-        return session_starts.astype(bool)
 
     @property
     def session_probs(self):
@@ -104,42 +170,6 @@ class TwoArmedBandit(DataWriter):
         """
         return np.array([self.probs[self.session_ids == s] for s in self.sessions])
 
-    def _fix_probs(self, probs):
-        """Fix the probs to be between 0 and 1. Most of our sessions have probabilities in 0-100 range.
-
-        Parameters
-        ----------
-        probs : _type_
-            _description_
-
-        Returns
-        -------
-        _type_
-            _description_
-        """
-        if probs.max() > 1:
-            probs = probs / 100
-
-        # probs = np.clip(probs, 0, 1)
-        return probs
-
-    def _fix_choices(self, choices):
-        """Fix choices to start from 1,2.....
-
-        Parameters
-        ----------
-        probs : _type_
-            _description_
-
-        Returns
-        -------
-        _type_
-            _description_
-        """
-        choices = choices - choices.min() + 1
-
-        return choices
-
     def get_binarized_choices(self):
         """get choices coded as 0 and 1
 
@@ -151,7 +181,7 @@ class TwoArmedBandit(DataWriter):
         assert self.n_ports == 2, "Only implemented for 2AB task"
         return np.where(self.choices == 2, 1, 0)  # Port 1: 0 and Port 2: 1
 
-    def get_port_bias_2ab(df, min_trials=250):
+    def get_port_bias(df, min_trials=250):
 
         ntrials_by_session = get_trial_metrics(df)[0]
 
@@ -186,7 +216,7 @@ class TwoArmedBandit(DataWriter):
             _description_
         """
         df = pd.read_csv(fp)
-        return MultiArmedBandit(
+        return TwoArmedBandit(
             probs=df.loc[:, ["rewprobfull1", "rewprobfull2"]].to_numpy(),
             choices=df["port"].to_numpy(),
             rewards=df["reward"].to_numpy(),
@@ -194,62 +224,6 @@ class TwoArmedBandit(DataWriter):
             starts=df["trialstart"].to_numpy(),
             stops=df["trialend"].to_numpy(),
             datetime=df["datetime"].to_numpy(),
-            metadata=None,
-        )
-
-    def filter_by_trials(self, min_trials=100, clip_max=None):
-        """Keep only sessions with more than min_trials and optionally clip to max trials.
-
-        Parameters
-        ----------
-        min_trials : int, optional
-            Minimum number of trials in a session, by default 100
-        clip_max : int, optional
-            Maximum number of trials to keep per session, by default 100
-
-        Returns
-        -------
-        MultiArmedBandit
-            A new MultiArmedBandit instance with filtered sessions and trials.
-        """
-        ntrials_by_session = self.ntrials_session
-        valid_sessions = self.sessions[ntrials_by_session >= min_trials]
-        mask = np.isin(self.session_ids, valid_sessions)
-
-        # Filter data by valid sessions
-        filtered_probs = self.probs[mask]
-        filtered_choices = self.choices[mask]
-        filtered_rewards = self.rewards[mask]
-        filtered_session_ids = self.session_ids[mask]
-        filtered_starts = self.starts[mask]
-        filtered_stops = self.stops[mask]
-        filtered_datetime = self.datetime[mask]
-
-        # Clip to max trials per session if clip_max is specified
-        if clip_max is not None:
-            clipped_mask = []
-            for session in valid_sessions:
-                session_mask = filtered_session_ids == session
-                session_indices = np.where(session_mask)[0][:clip_max]
-                clipped_mask.extend(session_indices)
-
-            clipped_mask = np.array(clipped_mask)
-            filtered_probs = filtered_probs[clipped_mask]
-            filtered_choices = filtered_choices[clipped_mask]
-            filtered_rewards = filtered_rewards[clipped_mask]
-            filtered_session_ids = filtered_session_ids[clipped_mask]
-            filtered_starts = filtered_starts[clipped_mask]
-            filtered_stops = filtered_stops[clipped_mask]
-            filtered_datetime = filtered_datetime[clipped_mask]
-
-        return MultiArmedBandit(
-            probs=filtered_probs,
-            choices=filtered_choices,
-            rewards=filtered_rewards,
-            session_ids=filtered_session_ids,
-            starts=filtered_starts,
-            stops=filtered_stops,
-            datetime=filtered_datetime,
             metadata=None,
         )
 
@@ -287,42 +261,6 @@ class TwoArmedBandit(DataWriter):
         valid_sessions = np.unique(self.session_ids[delta_bool])
 
         return self.filter_by_session_id(valid_sessions)
-
-    def filter_by_session_id(self, ids):
-        """Keep only sessions with the specified IDs.
-
-        Parameters
-        ----------
-        ids : list of int
-            list of session IDs to keep
-
-        Returns
-        -------
-        MultiArmedBandit
-            A new MultiArmedBandit instance with filtered sessions.
-        """
-
-        mask = np.isin(self.session_ids, ids)
-
-        # Filter data by valid sessions
-        filtered_probs = self.probs[mask]
-        filtered_choices = self.choices[mask]
-        filtered_rewards = self.rewards[mask]
-        filtered_session_ids = self.session_ids[mask]
-        filtered_starts = self.starts[mask]
-        filtered_stops = self.stops[mask]
-        filtered_datetime = self.datetime[mask]
-
-        return MultiArmedBandit(
-            probs=filtered_probs,
-            choices=filtered_choices,
-            rewards=filtered_rewards,
-            session_ids=filtered_session_ids,
-            starts=filtered_starts,
-            stops=filtered_stops,
-            datetime=filtered_datetime,
-            metadata=None,
-        )
 
     def get_switch_prob(self, session_id=None):
         """Get the probability of switching between two ports in a session.
