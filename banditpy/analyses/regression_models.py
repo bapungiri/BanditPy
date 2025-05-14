@@ -7,15 +7,15 @@ from sklearn.linear_model import LogisticRegression
 from pathlib import Path
 
 
-class HistoryBasedLogisticModel:
+class Logistic2Arm:
     """Based on Miller et al. 2021, "From predictive models to cognitive models....." """
 
-    def __init__(self, mab: core.TwoArmedBandit, n_past=5):
-        assert mab.n_ports == 2, "Only 2-armed bandit task is supported"
+    def __init__(self, task: core.TwoArmedBandit, n_past=5):
+        assert task.n_ports == 2, "Only 2-armed bandit task is supported"
         self.choices, self.rewards = self._reformat_choices_rewards(
-            mab.choices, mab.rewards
+            task.choices, task.rewards
         )
-        self.rewards = mab.rewards
+        self.rewards = task.rewards
         self.n_past = n_past
         self.model = LogisticRegression(solver="lbfgs")
         self.feature_names = []

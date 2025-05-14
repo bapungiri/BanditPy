@@ -4,7 +4,7 @@ from .. import core
 from scipy.optimize import differential_evolution
 
 
-class QlearningEstimator:
+class Qlearn2Arm:
     """Estimate Q-learning parameters for a multi-armed bandit task
 
     Vanilla Q-learning model:
@@ -16,7 +16,7 @@ class QlearningEstimator:
     H = H + alpha_h * (choice - H)
     """
 
-    def __init__(self, mab: core.TwoArmedBandit, model="vanilla", n_cpu=1):
+    def __init__(self, task: core.Bandit2Arm, model="vanilla", n_cpu=1):
         """
         Initialize the Q-learning estimator.
 
@@ -27,7 +27,7 @@ class QlearningEstimator:
         model : str, ("vanilla", "persev")
             which model to fit, by default "vanilla"
         """
-        assert mab.n_ports == 2, "This task has more than 2 ports"
+        assert task.n_ports == 2, "This task has more than 2 ports"
 
         if model == "vanilla":
             self.n_params = 3
@@ -36,10 +36,10 @@ class QlearningEstimator:
         else:
             raise ValueError(f"Unknown model: {self.model}")
 
-        self.choices = mab.choices
-        self.rewards = mab.rewards
-        self.is_session_start = mab.is_session_start
-        self.session_ids = mab.session_ids
+        self.choices = task.choices
+        self.rewards = task.rewards
+        self.is_session_start = task.is_session_start
+        self.session_ids = task.session_ids
         self.estimated_params = None
         self.model = model
         self.n_cpu = n_cpu
