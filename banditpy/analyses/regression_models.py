@@ -10,7 +10,7 @@ from pathlib import Path
 class Logistic2Arm:
     """Based on Miller et al. 2021, "From predictive models to cognitive models....." """
 
-    def __init__(self, task: core.TwoArmedBandit, n_past=5):
+    def __init__(self, task: core.Bandit2Arm, n_past=5):
         assert task.n_ports == 2, "Only 2-armed bandit task is supported"
         self.choices, self.rewards = self._reformat_choices_rewards(
             task.choices, task.rewards
