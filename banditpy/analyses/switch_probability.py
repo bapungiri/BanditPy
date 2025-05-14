@@ -1,12 +1,12 @@
 import numpy as np
 import pandas as pd
-from ..core import TwoArmedBandit
+from ..core import Bandit2Arm
 from numpy.lib.stride_tricks import sliding_window_view
 
 
-class SwitchProbability2AB:
-    def __init__(self, task: TwoArmedBandit):
-        assert isinstance(task, TwoArmedBandit), "task must be a TwoArmedBandit object"
+class SwitchProb2Arm:
+    def __init__(self, task: Bandit2Arm):
+        assert isinstance(task, Bandit2Arm), "task must be a Bandit2Arm object"
         self.task = task
 
     def by_session(self, session_id=None):
