@@ -1,12 +1,12 @@
 import numpy as np
-from neuropy.core import DataWriter
+from .data_manager import DataManager
 from scipy import stats
 from scipy.ndimage import gaussian_filter1d
 import pandas as pd
 from numpy.lib.stride_tricks import sliding_window_view
 
 
-class BanditTask(DataWriter):
+class BanditTask(DataManager):
     """Base class for bandit tasks"""
 
     def __init__(
