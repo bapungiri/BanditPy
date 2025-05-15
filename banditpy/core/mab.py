@@ -216,7 +216,7 @@ class Bandit2Arm(BanditTask):
             _description_
         """
         df = pd.read_csv(fp)
-        return TwoArmedBandit(
+        return Bandit2Arm(
             probs=df.loc[:, ["rewprobfull1", "rewprobfull2"]].to_numpy(),
             choices=df["port"].to_numpy(),
             rewards=df["reward"].to_numpy(),
