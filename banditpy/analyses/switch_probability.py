@@ -133,9 +133,23 @@ class SwitchProb2Arm:
             seq[seq == "-2"] = "b"
             seq[seq == "2"] = "B"
 
+            # sort_indx = np.lexsort((seq[:, 1], seq[:, 2]))
+            arr = np.array(list(zip(seq[:, -1], seq[:, -2], np.arange(seq.shape[0]))))
+
+            def sort_key(row):
+                return (
+                    row[0].upper(),
+                    row[0].islower(),
+                    row[1].upper(),
+                    row[1].islower(),
+                )
+
+            sorted_arr = np.array(sorted(arr, key=sort_key))
+            sort_indx = sorted_arr[:, -1].astype(int)
+
             seq = np.array(["".join(map(str, _)) for _ in seq])
 
-            return switch_prob, seq
+            return switch_prob[sort_indx], seq[sort_indx]
 
         else:
             return switch_prob, unq_history
