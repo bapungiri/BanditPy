@@ -1,1 +1,1 @@
-from .rnn_models import BanditTrainer
+from .rnn_models import BanditTrainer2Arm
