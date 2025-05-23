@@ -163,16 +163,13 @@ class BanditTrainer2Arm:
     def _get_reward_probs(self, structured):
         """
         Generates reward probabilities for the two arms for a session.
-        Probabilities are chosen independently from [0.1, 0.2, ..., 0.9].
         """
-        probs_range = np.round(np.arange(0.1, 1.0, 0.1), 1)
 
         if structured:
-            p_arm1 = np.random.choice(probs_range)
+            p_arm1 = np.random.uniform(0, 1)
             p_arm2 = 1.0 - p_arm1
-
         else:
-            p_arm1, p_arm2 = np.random.choice(probs_range, 2)
+            p_arm1, p_arm2 = np.random.uniform(0, 1), np.random.uniform(0, 1)
         return [p_arm1, p_arm2]  # Index 0 for arm 1, index 1 for arm 2
 
     def _generate_input(self, env_action, reward):
@@ -208,6 +205,7 @@ class BanditTrainer2Arm:
 
     def train(self, structured=True):
         print(f"Starting training for {self.n_train_sessions} sessions...")
+        training_data = []
         for session_idx in range(self.n_train_sessions):
             session_reward_probs = self._get_reward_probs(structured)
 
@@ -241,6 +239,16 @@ class BanditTrainer2Arm:
                 input_tensors_for_update.append(next_input_tensor)
                 current_input_for_model = next_input_tensor.unsqueeze(0).unsqueeze(0)
 
+                training_data.append(
+                    {
+                        "session_id": session_idx + 1,
+                        "chosen_action": env_action,
+                        "reward": reward,
+                        "arm1_reward_prob": session_reward_probs[0],
+                        "arm2_reward_prob": session_reward_probs[1],
+                    }
+                )
+
             G = self._discounted_return(rewards_received)
             x_seq_tensor = torch.stack(input_tensors_for_update).unsqueeze(0)
 
@@ -268,6 +276,7 @@ class BanditTrainer2Arm:
             self.training_loss_history.append(loss.item())
             self.optimizer.zero_grad()
             loss.backward()
+            # torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             self.optimizer.step()
 
             if (session_idx + 1) % 100 == 0:
@@ -288,7 +297,10 @@ class BanditTrainer2Arm:
         print(f"Training complete. Final avg loss: {final_avg_loss:.4f}")
         self.save_model()
 
-    def evaluate(self, structured=True):
+        df_training_results = pd.DataFrame(training_data)
+        return df_training_results
+
+    def evaluate(self, reward_probs=None):
         print("Starting evaluation with fixed weights...")
         try:
             self.load_model()  # Loads model and sets to eval mode
@@ -299,11 +311,8 @@ class BanditTrainer2Arm:
         evaluation_data = []
 
         for session_idx in range(self.n_test_sessions):
-            session_reward_probs = self._get_reward_probs(structured)
-            arm1_reward_prob, arm2_reward_prob = (
-                session_reward_probs[0],
-                session_reward_probs[1],
-            )
+            # session_reward_probs = self._get_reward_probs(structured)
+            session_reward_probs = reward_probs
 
             current_input_for_model = torch.zeros(
                 (1, 1, self.input_size), device=self.device
@@ -317,7 +326,10 @@ class BanditTrainer2Arm:
                     )
 
                 prob_step = F.softmax(policy_logits_step.squeeze(0), dim=-1)
-                model_action = torch.argmax(prob_step).item()  # Greedy action (0 or 1)
+                # model_action = torch.argmax(prob_step).item()  # Greedy action (0 or 1)
+                dist_step = torch.distributions.Categorical(prob_step)
+                model_action = dist_step.sample().item()
+
                 env_action = model_action + 1  # Convert to 1 or 2
 
                 reward = (
@@ -329,8 +341,8 @@ class BanditTrainer2Arm:
                         "session_id": session_idx + 1,
                         "chosen_action": env_action,
                         "reward": reward,
-                        "arm1_reward_prob": arm1_reward_prob,
-                        "arm2_reward_prob": arm2_reward_prob,
+                        "arm1_reward_prob": session_reward_probs[0],
+                        "arm2_reward_prob": session_reward_probs[1],
                     }
                 )
 
