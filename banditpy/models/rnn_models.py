@@ -6,6 +6,7 @@ import pandas as pd
 import random
 import os
 import math  # Ensure math is imported for PaperBanditLSTM
+from tqdm import tqdm
 
 
 class BanditLSTMModel(nn.Module):
@@ -117,25 +118,18 @@ class BanditLSTMModel(nn.Module):
 class BanditTrainer2Arm:
     def __init__(
         self,
-        # Task specific defaults
-        n_train_sessions=10000,
-        n_test_sessions=300,
-        trials_per_session=100,
         # Model and training hparams
         input_size=3,  # 2 for one-hot action (1,2) + 1 for reward
         hidden_size=48,
         num_model_actions=2,  # Model outputs Q-values for 2 actions (0, 1)
-        lr=0.0007,
+        lr=0.00004,
         gamma=0.9,
         beta_entropy=0.05,
-        beta_value=0.05,
+        beta_value=0.025,
         model_path="two_arm_task_model.pt",
         device=None,
     ):
 
-        self.n_train_sessions = n_train_sessions
-        self.n_test_sessions = n_test_sessions
-        self.trials_per_session = trials_per_session
         self.gamma = gamma
         self.beta_entropy = beta_entropy
         self.beta_value = beta_value
@@ -144,12 +138,12 @@ class BanditTrainer2Arm:
         self.num_model_actions = (
             num_model_actions  # Number of outputs from the policy head
         )
+        self.train_type = None
 
         self.device = device or torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
         )
 
-        # Using WangEtAlRNN as the model
         self.model = BanditLSTMModel(
             input_size=self.input_size,
             hidden_size=hidden_size,
@@ -160,16 +154,53 @@ class BanditTrainer2Arm:
         self.optimizer = torch.optim.RMSprop(self.model.parameters(), lr=lr, alpha=0.99)
         self.training_loss_history = []
 
-    def _get_reward_probs(self, structured):
+    def _set_train_type(self, mode):
+        """
+        Sets the task type based on whether the task is structured or not.
+        """
+        match mode:
+            case "Structured" | "Struc" | "S":
+                self.train_type = "Structured"
+
+            case "Unstructured" | "Unstruc" | "U":
+                self.train_type = "Unstructured"
+
+            case isinstance(mode, list):
+                if len(mode) != 2:
+                    raise ValueError(
+                        "Reward probabilities list must have exactly 2 elements."
+                    )
+                self.train_type = "CustomProbabilities"
+            case _:
+                self.train_type = "Unknown"
+
+    def _get_reward_probs(self, mode):
         """
         Generates reward probabilities for the two arms for a session.
         """
+        match mode:
+            case "Structured" | "Struc" | "S":
+                p_arm1 = np.round(np.random.uniform(0, 1), 2)
+                p_arm2 = 1.0 - p_arm1
 
-        if structured:
-            p_arm1 = np.random.uniform(0, 1)
-            p_arm2 = 1.0 - p_arm1
-        else:
-            p_arm1, p_arm2 = np.random.uniform(0, 1), np.random.uniform(0, 1)
+            case "Unstructured" | "Unstruc" | "U":
+                p_arm1 = np.round(np.random.uniform(0, 1), 2)
+                p_arm2 = np.round(np.random.uniform(0, 1), 2)
+
+            case [p_arm1, p_arm2]:
+                pass
+            case list():
+                raise ValueError(
+                    "Reward probabilities list must have exactly 2 elements."
+                )
+            case _:
+                raise ValueError(
+                    "Invalid mode. Use 'Structured'/'Struc'/'S', 'Unstructured'/'Unstruc'/'U', or a list of probabilities of length 2."
+                )
+        # Ensure probabilities are valid
+        if not (0 <= p_arm1 <= 1 and 0 <= p_arm2 <= 1):
+            raise ValueError("Reward probabilities must be between 0 and 1.")
+
         return [p_arm1, p_arm2]  # Index 0 for arm 1, index 1 for arm 2
 
     def _generate_input(self, env_action, reward):
@@ -203,11 +234,12 @@ class BanditTrainer2Arm:
             G.insert(0, R_val)
         return torch.tensor(G, dtype=torch.float32, device=self.device)
 
-    def train(self, structured=True):
-        print(f"Starting training for {self.n_train_sessions} sessions...")
+    def train(self, mode, n_sessions=10000, n_trials=200, return_df=False):
+        self._set_train_type(mode)
+        print(f"Starting training for {n_sessions} {self.train_type} sessions...")
         training_data = []
-        for session_idx in range(self.n_train_sessions):
-            session_reward_probs = self._get_reward_probs(structured)
+        for session_idx in tqdm(range(n_sessions)):
+            session_reward_probs = self._get_reward_probs(mode=mode)
 
             input_tensors_for_update, model_actions_taken, rewards_received = [], [], []
 
@@ -216,7 +248,7 @@ class BanditTrainer2Arm:
             )
             lstm_hidden_state = None
 
-            for _ in range(self.trials_per_session):
+            for _ in range(n_trials):
                 policy_logits_step, _, lstm_hidden_state = self.model(
                     current_input_for_model, lstm_hidden_state
                 )
@@ -276,18 +308,8 @@ class BanditTrainer2Arm:
             self.training_loss_history.append(loss.item())
             self.optimizer.zero_grad()
             loss.backward()
-            # torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             self.optimizer.step()
-
-            if (session_idx + 1) % 100 == 0:
-                avg_loss = (
-                    np.mean(self.training_loss_history[-100:])
-                    if self.training_loss_history
-                    else float("nan")
-                )
-                print(
-                    f"Training Session {session_idx+1}/{self.n_train_sessions}, Avg Loss (last 100): {avg_loss:.4f}"
-                )
 
         final_avg_loss = (
             np.mean(self.training_loss_history[-100:])
@@ -297,10 +319,15 @@ class BanditTrainer2Arm:
         print(f"Training complete. Final avg loss: {final_avg_loss:.4f}")
         self.save_model()
 
-        df_training_results = pd.DataFrame(training_data)
-        return df_training_results
+        if return_df:
+            print("Returning training results as DataFrame.")
+            df_training_results = pd.DataFrame(training_data)
+            return df_training_results
+        else:
+            # print("Training results not returned as DataFrame.")
+            return None
 
-    def evaluate(self, reward_probs=None):
+    def evaluate(self, mode, reward_probs=None, n_sessions=200, n_trials=200):
         print("Starting evaluation with fixed weights...")
         try:
             self.load_model()  # Loads model and sets to eval mode
@@ -310,16 +337,18 @@ class BanditTrainer2Arm:
 
         evaluation_data = []
 
-        for session_idx in range(self.n_test_sessions):
-            # session_reward_probs = self._get_reward_probs(structured)
-            session_reward_probs = reward_probs
+        for session_idx in tqdm(range(n_sessions), mininterval=1):
+            if reward_probs is None:
+                session_reward_probs = self._get_reward_probs(mode)
+            else:
+                session_reward_probs = reward_probs
 
             current_input_for_model = torch.zeros(
                 (1, 1, self.input_size), device=self.device
             )
             lstm_hidden_state = None
 
-            for _ in range(self.trials_per_session):
+            for _ in range(n_trials):
                 with torch.no_grad():
                     policy_logits_step, _, lstm_hidden_state = self.model(
                         current_input_for_model, lstm_hidden_state
@@ -349,26 +378,42 @@ class BanditTrainer2Arm:
                 next_input_tensor = self._generate_input(env_action, reward)
                 current_input_for_model = next_input_tensor.unsqueeze(0).unsqueeze(0)
 
-            if (session_idx + 1) % 50 == 0:
-                print(
-                    f"Evaluation Session {session_idx+1}/{self.n_test_sessions} complete."
-                )
-
         df_evaluation_results = pd.DataFrame(evaluation_data)
         print("Evaluation complete.")
         return df_evaluation_results
 
     def save_model(self):
-        torch.save(self.model.state_dict(), self.model_path)
-        print(f"Model saved to {self.model_path}")
+        """
+        Saves both the model state dict and training loss history.
+        """
+        checkpoint = {
+            "model_state_dict": self.model.state_dict(),
+            "training_loss_history": self.training_loss_history,
+            "optimizer_state_dict": self.optimizer.state_dict(),
+        }
+        torch.save(checkpoint, self.model_path)
+        print(f"Model and training history saved to {self.model_path}")
 
     def load_model(self):
+        """
+        Loads the model state dict and training loss history.
+        """
         if os.path.exists(self.model_path):
-            self.model.load_state_dict(
-                torch.load(self.model_path, map_location=self.device)
-            )
+            checkpoint = torch.load(self.model_path, map_location=self.device)
+
+            # Load model state dict
+            self.model.load_state_dict(checkpoint["model_state_dict"])
             self.model.eval()  # Ensure model is in evaluation mode after loading
-            print(f"Model loaded from {self.model_path}")
+
+            # Load training loss history
+            self.training_loss_history = checkpoint.get("training_loss_history", [])
+
+            # Optional: load optimizer state if you want to resume training
+            if "optimizer_state_dict" in checkpoint:
+                self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+            print(f"Model and training history loaded from {self.model_path}")
+            print(f"Loaded {len(self.training_loss_history)} training loss values")
         else:
             raise FileNotFoundError(f"Model file not found at: {self.model_path}")
 
@@ -377,3 +422,81 @@ class BanditTrainer2Arm:
         Returns the model weights as a dictionary.
         """
         return {k: v.cpu().numpy() for k, v in self.model.state_dict().items()}
+
+    def analyze_weights(self):
+        """
+        Analyze the learned weights of the network.
+        """
+        weights = self.get_model_weights()
+
+        analysis = {}
+
+        # RNN weights analysis
+        rnn_weights = {k: v for k, v in weights.items() if "rnn" in k}
+
+        analysis["rnn_weight_stats"] = {}
+        for name, weight in rnn_weights.items():
+            analysis["rnn_weight_stats"][name] = {
+                "mean": float(np.mean(weight)),
+                "std": float(np.std(weight)),
+                "min": float(np.min(weight)),
+                "max": float(np.max(weight)),
+            }
+
+        # Policy head analysis
+        policy_weights = weights["policy_head.weight"]
+        analysis["policy_head"] = {
+            "weights": policy_weights,
+            "bias": weights["policy_head.bias"],
+            "action_preferences": weights[
+                "policy_head.bias"
+            ],  # Bias shows initial action preference
+        }
+
+        return analysis
+
+    def plot_weight_analysis(self):
+        """
+        Visualize weight distributions and patterns.
+        """
+        import matplotlib.pyplot as plt
+
+        weights = self.get_model_weights()
+
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+
+        # 1. RNN weight distributions
+        rnn_ih = weights["rnn.weight_ih_l0"].flatten()
+        rnn_hh = weights["rnn.weight_hh_l0"].flatten()
+
+        axes[0, 0].hist(rnn_ih, alpha=0.7, label="Input-to-Hidden", bins=30)
+        axes[0, 0].hist(rnn_hh, alpha=0.7, label="Hidden-to-Hidden", bins=30)
+        axes[0, 0].set_title("RNN Weight Distributions")
+        axes[0, 0].legend()
+
+        # 2. Policy head weights heatmap
+        policy_weights = weights["policy_head.weight"]
+        im = axes[0, 1].imshow(policy_weights, aspect="auto", cmap="RdBu")
+        axes[0, 1].set_title("Policy Head Weights")
+        axes[0, 1].set_xlabel("Hidden Units")
+        axes[0, 1].set_ylabel("Actions")
+        plt.colorbar(im, ax=axes[0, 1])
+
+        # 3. Value head weights
+        value_weights = weights["value_head.weight"].flatten()
+        axes[1, 0].bar(range(len(value_weights)), value_weights)
+        axes[1, 0].set_title("Value Head Weights")
+        axes[1, 0].set_xlabel("Hidden Units")
+        axes[1, 0].set_ylabel("Weight Value")
+
+        # 4. Bias comparison
+        policy_bias = weights["policy_head.bias"]
+        value_bias = weights["value_head.bias"]
+
+        axes[1, 1].bar(["Action 1", "Action 2"], policy_bias, label="Policy Bias")
+        axes[1, 1].bar(["Value"], value_bias, label="Value Bias", alpha=0.7)
+        axes[1, 1].set_title("Output Layer Biases")
+        axes[1, 1].legend()
+
+        # plt.tight_layout()
+        return fig
