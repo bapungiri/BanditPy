@@ -122,10 +122,10 @@ class BanditTrainer2Arm:
         input_size=3,  # 2 for one-hot action (1,2) + 1 for reward
         hidden_size=48,
         num_model_actions=2,  # Model outputs Q-values for 2 actions (0, 1)
-        lr=0.00004,
-        gamma=0.9,
+        lr=0.00005,
+        gamma=0.95,
         beta_entropy=0.05,
-        beta_value=0.025,
+        beta_value=0.05,
         model_path="two_arm_task_model.pt",
         device=None,
     ):
@@ -498,5 +498,265 @@ class BanditTrainer2Arm:
         axes[1, 1].set_title("Output Layer Biases")
         axes[1, 1].legend()
 
-        # plt.tight_layout()
         return fig
+
+    def analyze_hidden_states(self, reward_probs=[0.3, 0.7], n_trials=100):
+        """
+        Analyze hidden state evolution during a single session.
+        Returns hidden states, actions, and rewards for analysis.
+
+        Args:
+            reward_probs (list): Fixed reward probabilities for the two arms
+            n_trials (int): Number of trials to analyze
+
+        Returns:
+            dict: Dictionary containing hidden states, actions, rewards, etc.
+        """
+        self.model.eval()
+
+        session_data = {
+            "hidden_states": [],
+            "cell_states": [],  # For LSTM
+            "actions": [],
+            "rewards": [],
+            "policy_logits": [],
+            "value_estimates": [],
+        }
+
+        current_input = torch.zeros((1, 1, self.input_size), device=self.device)
+        lstm_hidden_state = None
+
+        for trial in range(n_trials):
+            with torch.no_grad():
+                policy_logits, value_est, lstm_hidden_state = self.model(
+                    current_input, lstm_hidden_state
+                )
+
+                # Store hidden and cell states
+                h_n, c_n = lstm_hidden_state
+                session_data["hidden_states"].append(h_n.squeeze().cpu().numpy())
+                session_data["cell_states"].append(c_n.squeeze().cpu().numpy())
+                session_data["policy_logits"].append(
+                    policy_logits.squeeze().cpu().numpy()
+                )
+                session_data["value_estimates"].append(
+                    value_est.squeeze().cpu().numpy()
+                )
+
+                # Sample action (use sampling, not greedy, for better analysis)
+                prob_step = F.softmax(policy_logits.squeeze(0), dim=-1)
+                dist_step = torch.distributions.Categorical(prob_step)
+                model_action = dist_step.sample().item()
+                env_action = model_action + 1
+
+                # Generate reward
+                reward = 1.0 if random.random() < reward_probs[model_action] else 0.0
+
+                session_data["actions"].append(env_action)
+                session_data["rewards"].append(reward)
+
+                # Prepare next input
+                next_input = self._generate_input(env_action, reward)
+                current_input = next_input.unsqueeze(0).unsqueeze(0)
+
+        return session_data
+
+    def plot_rnn_activation_evolution(
+        self, reward_probs=[0.3, 0.7], n_trials=50, session_idx=0
+    ):
+        """
+        Plot the evolution of RNN activation patterns during individual trials.
+
+        Args:
+            reward_probs: Fixed reward probabilities for the two arms
+            n_trials: Number of trials to analyze
+            session_idx: Which session to analyze (for title)
+        """
+        import matplotlib.pyplot as plt
+        import numpy as np
+
+        self.model.eval()
+
+        # Storage for activation data
+        hidden_states = []
+        cell_states = []
+        actions = []
+        rewards = []
+        policy_probs = []
+        value_estimates = []
+
+        # Initialize
+        current_input = torch.zeros((1, 1, self.input_size), device=self.device)
+        lstm_hidden_state = None
+
+        # Collect data for each trial
+        for trial in range(n_trials):
+            with torch.no_grad():
+                policy_logits, value_est, lstm_hidden_state = self.model(
+                    current_input, lstm_hidden_state
+                )
+
+                # Store activations
+                h_n, c_n = lstm_hidden_state
+                hidden_states.append(h_n.squeeze().cpu().numpy())
+                cell_states.append(c_n.squeeze().cpu().numpy())
+
+                # Store policy and value
+                probs = F.softmax(policy_logits.squeeze(), dim=-1)
+                policy_probs.append(probs.cpu().numpy())
+                value_estimates.append(value_est.squeeze().cpu().numpy())
+
+                # Sample action
+                model_action = torch.distributions.Categorical(probs).sample().item()
+                env_action = model_action + 1
+                actions.append(env_action)
+
+                # Generate reward
+                reward = 1.0 if np.random.random() < reward_probs[model_action] else 0.0
+                rewards.append(reward)
+
+                # Prepare next input
+                next_input = self._generate_input(env_action, reward)
+                current_input = next_input.unsqueeze(0).unsqueeze(0)
+
+        # Convert to arrays
+        hidden_states = np.array(hidden_states)  # Shape: (n_trials, hidden_size)
+        cell_states = np.array(cell_states)
+        policy_probs = np.array(policy_probs)
+        value_estimates = np.array(value_estimates)
+        actions = np.array(actions)
+        rewards = np.array(rewards)
+
+        # Create comprehensive plot
+        fig, axes = plt.subplots(3, 2, figsize=(15, 12))
+
+        # 1. Hidden state heatmap
+        im1 = axes[0, 0].imshow(
+            hidden_states.T, aspect="auto", cmap="RdBu", interpolation="nearest"
+        )
+        axes[0, 0].set_title("Hidden State Evolution")
+        axes[0, 0].set_xlabel("Trial")
+        axes[0, 0].set_ylabel("Hidden Unit")
+        plt.colorbar(im1, ax=axes[0, 0])
+
+        # 2. Cell state heatmap
+        im2 = axes[0, 1].imshow(
+            cell_states.T, aspect="auto", cmap="RdBu", interpolation="nearest"
+        )
+        axes[0, 1].set_title("Cell State Evolution")
+        axes[0, 1].set_xlabel("Trial")
+        axes[0, 1].set_ylabel("Hidden Unit")
+        plt.colorbar(im2, ax=axes[0, 1])
+
+        # 3. Policy probabilities and actions
+        axes[1, 0].plot(policy_probs[:, 0], label="Prob(Action 1)", linewidth=2)
+        axes[1, 0].plot(policy_probs[:, 1], label="Prob(Action 2)", linewidth=2)
+
+        # Color background based on actual actions taken
+        for trial in range(n_trials):
+            color = "lightblue" if actions[trial] == 1 else "lightcoral"
+            axes[1, 0].axvspan(trial - 0.5, trial + 0.5, alpha=0.3, color=color)
+
+        axes[1, 0].set_title("Policy Probabilities & Actions")
+        axes[1, 0].set_xlabel("Trial")
+        axes[1, 0].set_ylabel("Probability")
+        axes[1, 0].legend()
+        axes[1, 0].set_ylim(0, 1)
+
+        # 4. Value estimates and rewards
+        axes[1, 1].plot(
+            value_estimates, label="Value Estimate", linewidth=2, color="green"
+        )
+
+        # Show rewards as scatter
+        reward_trials = np.where(rewards == 1)[0]
+        no_reward_trials = np.where(rewards == 0)[0]
+        axes[1, 1].scatter(
+            reward_trials,
+            np.ones(len(reward_trials)),
+            color="gold",
+            s=50,
+            label="Reward",
+            zorder=5,
+        )
+        axes[1, 1].scatter(
+            no_reward_trials,
+            np.zeros(len(no_reward_trials)),
+            color="red",
+            s=50,
+            label="No Reward",
+            zorder=5,
+        )
+
+        axes[1, 1].set_title("Value Estimates & Rewards")
+        axes[1, 1].set_xlabel("Trial")
+        axes[1, 1].set_ylabel("Value / Reward")
+        axes[1, 1].legend()
+
+        # 5. Hidden state PCA evolution
+        from sklearn.decomposition import PCA
+
+        pca = PCA(n_components=2)
+        hidden_pca = pca.fit_transform(hidden_states)
+
+        # Color by trial number
+        scatter = axes[2, 0].scatter(
+            hidden_pca[:, 0], hidden_pca[:, 1], c=range(n_trials), cmap="viridis", s=60
+        )
+        axes[2, 0].plot(hidden_pca[:, 0], hidden_pca[:, 1], "k-", alpha=0.3)
+        axes[2, 0].set_title(
+            f"Hidden State Trajectory (PCA)\nVar explained: {pca.explained_variance_ratio_.sum():.2f}"
+        )
+        axes[2, 0].set_xlabel(f"PC1 ({pca.explained_variance_ratio_[0]:.2f})")
+        axes[2, 0].set_ylabel(f"PC2 ({pca.explained_variance_ratio_[1]:.2f})")
+        plt.colorbar(scatter, ax=axes[2, 0], label="Trial")
+
+        # 6. Action-reward contingency
+        action_reward_data = []
+        for trial in range(n_trials):
+            action_reward_data.append([trial, actions[trial], rewards[trial]])
+
+        action_reward_df = pd.DataFrame(
+            action_reward_data, columns=["Trial", "Action", "Reward"]
+        )
+
+        # Plot action choices over time with reward outcomes
+        for action in [1, 2]:
+            action_trials = action_reward_df[action_reward_df["Action"] == action]
+            rewarded = action_trials[action_trials["Reward"] == 1]
+            unrewarded = action_trials[action_trials["Reward"] == 0]
+
+            axes[2, 1].scatter(
+                rewarded["Trial"],
+                rewarded["Action"],
+                color="green",
+                s=60,
+                alpha=0.8,
+                label=f"Action {action} (Rewarded)" if action == 1 else None,
+            )
+            axes[2, 1].scatter(
+                unrewarded["Trial"],
+                unrewarded["Action"],
+                color="red",
+                s=60,
+                alpha=0.8,
+                label=f"Action {action} (No Reward)" if action == 1 else None,
+            )
+
+        axes[2, 1].set_title(f"Action-Reward History\nArm Probs: {reward_probs}")
+        axes[2, 1].set_xlabel("Trial")
+        axes[2, 1].set_ylabel("Action")
+        axes[2, 1].set_yticks([1, 2])
+        axes[2, 1].legend()
+
+        plt.suptitle(f"RNN Activation Evolution - Session {session_idx}", fontsize=16)
+
+        return fig, {
+            "hidden_states": hidden_states,
+            "cell_states": cell_states,
+            "policy_probs": policy_probs,
+            "value_estimates": value_estimates,
+            "actions": actions,
+            "rewards": rewards,
+            "hidden_pca": hidden_pca,
+        }
