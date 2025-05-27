@@ -168,7 +168,7 @@ class Bandit2Arm(BanditTask):
         _type_
             _description_
         """
-        return np.array([self.probs[self.session_ids == s] for s in self.sessions])
+        return self.probs[self.is_session_start, :]
 
     def get_binarized_choices(self):
         """get choices coded as 0 and 1
