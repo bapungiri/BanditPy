@@ -122,7 +122,7 @@ class BanditTrainer2Arm:
         input_size=3,  # 2 for one-hot action (1,2) + 1 for reward
         hidden_size=48,
         num_model_actions=2,  # Model outputs Q-values for 2 actions (0, 1)
-        lr=0.00004,
+        lr=0.00001,
         gamma=0.9,
         beta_entropy=0.05,
         beta_value=0.025,
