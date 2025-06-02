@@ -122,7 +122,7 @@ class BanditTrainer2Arm:
         input_size=3,  # 2 for one-hot action (1,2) + 1 for reward
         hidden_size=48,
         num_model_actions=2,  # Model outputs Q-values for 2 actions (0, 1)
-        lr=0.00001,
+        lr=0.00004,
         gamma=0.9,
         beta_entropy=0.05,
         beta_value=0.025,
@@ -781,3 +781,21 @@ class BanditTrainer2Arm:
             "rewards": rewards,
             "hidden_pca": hidden_pca,
         }
+
+    def _calculate_entropy(self, actions):
+        """Calculate entropy of action distribution"""
+        if len(actions) == 0:
+            return 0
+
+        # Calculate probabilities for each action
+        p1 = (actions == 1).mean()
+        p2 = (actions == 2).mean()
+
+        # Calculate entropy (max entropy = 1 for 2 actions)
+        entropy = 0
+        if p1 > 0:
+            entropy -= p1 * np.log2(p1)
+        if p2 > 0:
+            entropy -= p2 * np.log2(p2)
+
+        return entropy
