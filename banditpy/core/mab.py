@@ -59,6 +59,10 @@ class BanditTask(DataManager):
         return self.probs.shape[1]
 
     @property
+    def n_trials(self):
+        return self.probs.shape[0]
+
+    @property
     def mean_ntrials(self):
         return np.mean(self.ntrials_session)
 
@@ -149,7 +153,11 @@ class Bandit2Arm(BanditTask):
 
     @property
     def is_choice_high(self):
-        return (np.argmax(self.probs, axis=1) + 1) == self.choices
+        # return (np.argmax(self.probs, axis=1) + 1) == self.choices
+        return (
+            np.max(self.probs, axis=1)
+            == self.probs[np.arange(self.n_trials), self.choices - 1]
+        )
 
     @property
     def probs_corr(self):
@@ -230,6 +238,25 @@ class Bandit2Arm(BanditTask):
     def trim_sessions(self, trial_start, trial_stop):
         pass
 
+    def filter_by_probs(self, probs):
+        """Keep only sessions with probabilities between min and max.
+
+        Parameters
+        ----------
+        prob_min : float, optional
+            Minimum probability to keep, by default 0.1
+        prob_max : float, optional
+            Maximum probability to keep, by default None
+
+        Returns
+        -------
+        Multi
+        """
+        probs = np.array(probs).reshape(-1, 2)
+        assert probs.shape[1] == 2, "This method is only implemented for 2AB task"
+        mask = (self.probs[:, None, :] == probs[None, :, :]).all(axis=2).any(axis=1)
+        return self._filtered(mask)
+
     def filter_by_deltaprob(self, delta_min, delta_max=None):
         """Keep only sessions with delta probabilities between min and max.
 
@@ -262,13 +289,13 @@ class Bandit2Arm(BanditTask):
 
         return self.filter_by_session_id(valid_sessions)
 
-    def get_performance(self, bin_size=None, as_df=False):
-        """Get performance on two armed bandit task
+    def get_optimal_choice_probability(self, bin_size=None, as_df=False):
+        """Get probability of choosing high arm on two armed bandit task
 
         Parameters
         ----------
         bin_size : int, optional
-            no.of sessions over which performance is calculated, by default 80
+            no.of sessions over which performance is calculated, by default None
         roll_step : int, optional
             _description_, by default 40
         delta_prob : _type_, optional
@@ -303,6 +330,20 @@ class Bandit2Arm(BanditTask):
             sess_div_perf = np.nanmean(is_choice_high_per_session, axis=0)
 
         return sess_div_perf
+
+    def get_reward_probability(self):
+        """Get the reward probabilities for each session.
+
+        Returns
+        -------
+        array-like
+            The reward probabilities for each session.
+        """
+        session_rewards = pd.DataFrame(
+            np.hsplit(self.rewards, np.cumsum(self.ntrials_session)[:-1])
+        ).to_numpy()
+
+        return np.nanmean(session_rewards, axis=0)
 
     def get_cummulative_reward(self):
         """Get the cumulative rewards for each session.
