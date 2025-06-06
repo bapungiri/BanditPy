@@ -122,14 +122,15 @@ class BanditTrainer2Arm:
         input_size=3,  # 2 for one-hot action (1,2) + 1 for reward
         hidden_size=48,
         num_model_actions=2,  # Model outputs Q-values for 2 actions (0, 1)
-        lr=0.00005,
-        gamma=0.95,
+        lr=0.00004,
+        gamma=0.9,
         beta_entropy=0.05,
-        beta_value=0.05,
+        beta_value=0.025,
         model_path="two_arm_task_model.pt",
         device=None,
     ):
 
+        self.lr = lr
         self.gamma = gamma
         self.beta_entropy = beta_entropy
         self.beta_value = beta_value
@@ -151,7 +152,9 @@ class BanditTrainer2Arm:
             recurrent_type="lstm",
         ).to(self.device)
 
-        self.optimizer = torch.optim.RMSprop(self.model.parameters(), lr=lr, alpha=0.99)
+        self.optimizer = torch.optim.RMSprop(
+            self.model.parameters(), lr=self.lr, alpha=0.99
+        )
         self.training_loss_history = []
 
     def _set_train_type(self, mode):
@@ -390,6 +393,12 @@ class BanditTrainer2Arm:
             "model_state_dict": self.model.state_dict(),
             "training_loss_history": self.training_loss_history,
             "optimizer_state_dict": self.optimizer.state_dict(),
+            "lr": self.lr,
+            "input_size": self.input_size,
+            "hidden_size": self.model.hidden_size,
+            "beta_entropy": self.beta_entropy,
+            "beta_value": self.beta_value,
+            "gamma": self.gamma,
         }
         torch.save(checkpoint, self.model_path)
         print(f"Model and training history saved to {self.model_path}")
@@ -411,6 +420,18 @@ class BanditTrainer2Arm:
             # Optional: load optimizer state if you want to resume training
             if "optimizer_state_dict" in checkpoint:
                 self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+            if "lr" in checkpoint:
+                self.lr = checkpoint.get("lr", [])
+
+            if "beta_entropy" in checkpoint:
+                self.beta_entropy = checkpoint.get("beta_entropy", [])
+
+            if "beta_value" in checkpoint:
+                self.beta_value = checkpoint.get("beta_value", [])
+
+            if "beta_value" in checkpoint:
+                self.gamma = checkpoint.get("gamma", [])
 
             print(f"Model and training history loaded from {self.model_path}")
             print(f"Loaded {len(self.training_loss_history)} training loss values")
@@ -760,3 +781,21 @@ class BanditTrainer2Arm:
             "rewards": rewards,
             "hidden_pca": hidden_pca,
         }
+
+    def _calculate_entropy(self, actions):
+        """Calculate entropy of action distribution"""
+        if len(actions) == 0:
+            return 0
+
+        # Calculate probabilities for each action
+        p1 = (actions == 1).mean()
+        p2 = (actions == 2).mean()
+
+        # Calculate entropy (max entropy = 1 for 2 actions)
+        entropy = 0
+        if p1 > 0:
+            entropy -= p1 * np.log2(p1)
+        if p2 > 0:
+            entropy -= p2 * np.log2(p2)
+
+        return entropy
