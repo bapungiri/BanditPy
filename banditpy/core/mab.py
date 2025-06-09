@@ -165,7 +165,8 @@ class Bandit2Arm(BanditTask):
 
     @property
     def is_structured(self):
-        return np.abs(self.probs_corr) > 0.9
+        # return np.abs(self.probs_corr) > 0.9
+        return self.probs_corr < -0.9
 
     @property
     def session_probs(self):
@@ -239,18 +240,16 @@ class Bandit2Arm(BanditTask):
         pass
 
     def filter_by_probs(self, probs):
-        """Keep only sessions with probabilities between min and max.
+        """Keep only sessions with probabilities that match the given probabilities.
 
         Parameters
         ----------
-        prob_min : float, optional
-            Minimum probability to keep, by default 0.1
-        prob_max : float, optional
-            Maximum probability to keep, by default None
+        probs : list of length or 2D numpy array, optional
+            Probabilities to match. If a list, it should contain two elements representing the probabilities for each port. If a 2D numpy array, it should have shape (n, 2) where each row represents the probabilities for each port.
 
         Returns
         -------
-        Multi
+        Bandit2Arm with filtered data
         """
         probs = np.array(probs).reshape(-1, 2)
         assert probs.shape[1] == 2, "This method is only implemented for 2AB task"
@@ -264,9 +263,9 @@ class Bandit2Arm(BanditTask):
 
         Parameters
         ----------
-        min : float
+        delta_min : float
             Minimum delta probability to keep
-        max : float, optional
+        delta_max : float, optional
             Maximum delta probability to keep, by default None
 
         Returns
@@ -276,7 +275,7 @@ class Bandit2Arm(BanditTask):
         assert self.n_ports == 2, "This method is only implemented for 2AB task"
 
         if delta_max is not None:
-            assert delta_min < delta_max, "min should be less than max"
+            assert delta_min <= delta_max, "min should be less than max"
         else:
             delta_max = 1
 
@@ -356,6 +355,25 @@ class Bandit2Arm(BanditTask):
         return np.array(
             [np.cumsum(session_rewards) for session_rewards in self.rewards]
         )
+
+    def get_entropy(self):
+        """Calculate the entropy of the probabilities for each trial.
+
+        Returns
+        -------
+        array-like
+            The entropy values for each trial.
+        """
+        choices = self.choices - 1
+        session_choices = pd.DataFrame(
+            np.hsplit(choices, np.cumsum(self.ntrials_session)[:-1])
+        ).to_numpy()
+
+        port2_prob = np.nanmean(session_choices, axis=0)
+        port1_prob = 1 - port2_prob
+        choices_prob = np.vstack((port1_prob, port2_prob))
+
+        return stats.entropy(choices_prob, base=2, axis=0)
 
 
 class Bandit4Arm(BanditTask):
