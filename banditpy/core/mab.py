@@ -211,13 +211,21 @@ class Bandit2Arm(BanditTask):
         return mean_choice, bin_centers
 
     @staticmethod
-    def from_csv(fp):
+    def from_csv(
+        fp, probs, choices, rewards, session_ids, starts=None, stops=None, datetime=None
+    ):
         """This function primarily written to handle data from anirudh's bandit task/processed data
 
         Parameters
         ----------
         fp : .csv file name
             File path to the csv file that contains the data
+        probs : list of str
+            List of column names in the csv file that contain the probabilities for each arm.
+        choices : str
+            Column name in the csv file that contains the choices made by the subject.
+        rewards : str
+            Column name in the csv file that contains the rewards received for each choice.
 
         Returns
         -------
@@ -226,13 +234,13 @@ class Bandit2Arm(BanditTask):
         """
         df = pd.read_csv(fp)
         return Bandit2Arm(
-            probs=df.loc[:, ["rewprobfull1", "rewprobfull2"]].to_numpy(),
-            choices=df["port"].to_numpy(),
-            rewards=df["reward"].to_numpy(),
-            session_ids=df["session#"].to_numpy(),
-            starts=df["trialstart"].to_numpy(),
-            stops=df["trialend"].to_numpy(),
-            datetime=df["datetime"].to_numpy(),
+            probs=df.loc[:, probs].to_numpy(),
+            choices=df[choices].to_numpy(),
+            rewards=df[rewards].to_numpy(),
+            session_ids=df[session_ids].to_numpy(),
+            starts=df[starts].to_numpy() if starts is not None else None,
+            stops=df[stops].to_numpy() if stops is not None else None,
+            datetime=df[datetime].to_numpy() if datetime is not None else None,
             metadata=None,
         )
 
