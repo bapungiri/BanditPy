@@ -364,7 +364,7 @@ class Bandit2Arm(BanditTask):
             [np.cumsum(session_rewards) for session_rewards in self.rewards]
         )
 
-    def get_entropy(self):
+    def get_choice_entropy(self):
         """Calculate the entropy of the probabilities for each trial.
 
         Returns
