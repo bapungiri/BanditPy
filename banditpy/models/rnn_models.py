@@ -177,18 +177,19 @@ class BanditTrainer2Arm:
             case _:
                 self.train_type = "Unknown"
 
-    def _get_reward_probs(self, mode):
+    def _get_reward_probs(self, mode, low=0, high=1, decimals=1):
         """
         Generates reward probabilities for the two arms for a session.
         """
+
         match mode:
             case "Structured" | "Struc" | "S":
-                p_arm1 = np.round(np.random.uniform(0, 1), 2)
+                p_arm1 = np.round(np.random.uniform(low, high), decimals=decimals)
                 p_arm2 = 1.0 - p_arm1
 
             case "Unstructured" | "Unstruc" | "U":
-                p_arm1 = np.round(np.random.uniform(0, 1), 2)
-                p_arm2 = np.round(np.random.uniform(0, 1), 2)
+                p_arm1 = np.round(np.random.uniform(low, high), decimals=decimals)
+                p_arm2 = np.round(np.random.uniform(low, high), decimals=decimals)
 
             case [p_arm1, p_arm2]:
                 pass
@@ -330,7 +331,9 @@ class BanditTrainer2Arm:
             # print("Training results not returned as DataFrame.")
             return None
 
-    def evaluate(self, mode, reward_probs=None, n_sessions=200, n_trials=200):
+    def evaluate(
+        self, mode, reward_probs=None, n_sessions=200, n_trials=200, **prob_kwargs
+    ):
         print("Starting evaluation with fixed weights...")
         try:
             self.load_model()  # Loads model and sets to eval mode
@@ -342,7 +345,7 @@ class BanditTrainer2Arm:
 
         for session_idx in tqdm(range(n_sessions), mininterval=1):
             if reward_probs is None:
-                session_reward_probs = self._get_reward_probs(mode)
+                session_reward_probs = self._get_reward_probs(mode, **prob_kwargs)
             else:
                 session_reward_probs = reward_probs
 
