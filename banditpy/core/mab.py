@@ -35,10 +35,14 @@ class BanditTask(DataManager):
         if starts is not None:
             assert starts.shape[0] == probs.shape[0], "starts should be of same length"
             self.starts = starts
+        else:
+            self.starts = None
 
         if stops is not None:
             assert stops.shape[0] == probs.shape[0], "stops should be of same length"
             self.stops = stops
+        else:
+            self.stops = None
 
         self.datetime = datetime
 
