@@ -157,54 +157,56 @@ class BanditTrainer2Arm:
         )
         self.training_loss_history = []
 
-    def _set_train_type(self, mode):
-        """
-        Sets the task type based on whether the task is structured or not.
-        """
-        match mode:
-            case "Structured" | "Struc" | "S":
-                self.train_type = "Structured"
-
-            case "Unstructured" | "Unstruc" | "U":
-                self.train_type = "Unstructured"
-
-            case isinstance(mode, list):
-                if len(mode) != 2:
-                    raise ValueError(
-                        "Reward probabilities list must have exactly 2 elements."
-                    )
-                self.train_type = "CustomProbabilities"
-            case _:
-                self.train_type = "Unknown"
-
-    def _get_reward_probs(self, mode):
+    def _get_reward_probs(self, mode, N, low=0, high=1, decimals=1):
         """
         Generates reward probabilities for the two arms for a session.
         """
-        match mode:
-            case "Structured" | "Struc" | "S":
-                p_arm1 = np.round(np.random.uniform(0, 1), 2)
-                p_arm2 = 1.0 - p_arm1
+        if isinstance(mode, np.ndarray):
+            if mode.shape == (2,):
+                p_arm1 = np.ones(N) * mode[0]
+                p_arm2 = np.ones(N) * mode[1]
+            elif mode.shape == (N, 2):
+                p_arm1, p_arm2 = mode[:, 0], mode[:, 1]
 
-            case "Unstructured" | "Unstruc" | "U":
-                p_arm1 = np.round(np.random.uniform(0, 1), 2)
-                p_arm2 = np.round(np.random.uniform(0, 1), 2)
+            self.train_type = "CustomProbabilities"
 
-            case [p_arm1, p_arm2]:
-                pass
-            case list():
-                raise ValueError(
-                    "Reward probabilities list must have exactly 2 elements."
-                )
-            case _:
-                raise ValueError(
-                    "Invalid mode. Use 'Structured'/'Struc'/'S', 'Unstructured'/'Unstruc'/'U', or a list of probabilities of length 2."
-                )
+        elif isinstance(mode, str):
+            match mode:
+                case "Structured" | "Struc" | "S":
+                    p_arm1 = np.round(
+                        np.random.uniform(low, high, size=N), decimals=decimals
+                    )
+                    p_arm2 = np.round(1.0 - p_arm1, decimals=decimals)
+
+                    self.train_type = "Structured"
+
+                case "Unstructured" | "Unstruc" | "U":
+                    p_arm1 = np.round(
+                        np.random.uniform(low, high, size=N), decimals=decimals
+                    )
+                    p_arm2 = np.round(
+                        np.random.uniform(low, high, size=N), decimals=decimals
+                    )
+                    self.train_type = "Unstructured"
+
+        elif isinstance(mode, list):
+            assert (
+                len(mode) == 2
+            ), "Reward probabilities list must have exactly 2 elements."
+            p_arm1 = mode[0] * np.ones(N)
+            p_arm2 = mode[1] * np.ones(N)
+            self.train_type = "CustomProbabilities"
+
+        else:
+            raise ValueError(
+                "Invalid mode. Use 'Structured'/'Struc'/'S', 'Unstructured'/'Unstruc'/'U', or a list of probabilities of length 2, or a numpy array of shape (2,) or (N, 2)."
+            )
+
         # Ensure probabilities are valid
-        if not (0 <= p_arm1 <= 1 and 0 <= p_arm2 <= 1):
+        if np.all(p_arm1 <= 1) and np.all(p_arm2 >= 1):
             raise ValueError("Reward probabilities must be between 0 and 1.")
 
-        return [p_arm1, p_arm2]  # Index 0 for arm 1, index 1 for arm 2
+        return np.array([p_arm1, p_arm2]).T  # Index 0 for arm 1, index 1 for arm 2
 
     def _generate_input(self, env_action, reward):
         """
@@ -237,12 +239,15 @@ class BanditTrainer2Arm:
             G.insert(0, R_val)
         return torch.tensor(G, dtype=torch.float32, device=self.device)
 
-    def train(self, mode, n_sessions=10000, n_trials=200, return_df=False):
-        self._set_train_type(mode)
+    def train(
+        self, mode, n_sessions=10000, n_trials=200, return_df=False, **prob_kwargs
+    ):
         print(f"Starting training for {n_sessions} {self.train_type} sessions...")
+        reward_probs = self._get_reward_probs(mode, N=n_sessions, **prob_kwargs)
+
         training_data = []
         for session_idx in tqdm(range(n_sessions)):
-            session_reward_probs = self._get_reward_probs(mode=mode)
+            session_reward_probs = reward_probs[session_idx]
 
             input_tensors_for_update, model_actions_taken, rewards_received = [], [], []
 
@@ -330,7 +335,7 @@ class BanditTrainer2Arm:
             # print("Training results not returned as DataFrame.")
             return None
 
-    def evaluate(self, mode, reward_probs=None, n_sessions=200, n_trials=200):
+    def evaluate(self, mode, n_sessions=200, n_trials=200, **prob_kwargs):
         print("Starting evaluation with fixed weights...")
         try:
             self.load_model()  # Loads model and sets to eval mode
@@ -338,13 +343,11 @@ class BanditTrainer2Arm:
             print(f"Evaluation failed: Model file not found at {self.model_path}.")
             return pd.DataFrame()
 
+        reward_probs = self._get_reward_probs(mode, N=n_sessions, **prob_kwargs)
         evaluation_data = []
 
         for session_idx in tqdm(range(n_sessions), mininterval=1):
-            if reward_probs is None:
-                session_reward_probs = self._get_reward_probs(mode)
-            else:
-                session_reward_probs = reward_probs
+            session_reward_probs = reward_probs[session_idx]
 
             current_input_for_model = torch.zeros(
                 (1, 1, self.input_size), device=self.device
