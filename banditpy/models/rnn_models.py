@@ -239,6 +239,20 @@ class BanditTrainer2Arm:
             G.insert(0, R_val)
         return torch.tensor(G, dtype=torch.float32, device=self.device)
 
+    def _reset_idxs(self, n_sessions):
+        """
+        Generates indices at which to reset the LSTM hidden state.
+        Mimics animal training where animals may do 3, 4, or 5 sessions before a break.
+        """
+        reset_freq = np.array([3, 4, 5])  # Every 3, 4, or 5 sessions
+        reset_idxs = np.cumsum(
+            np.random.choice(reset_freq, size=n_sessions // reset_freq.min())
+        )
+        reset_idxs = reset_idxs[reset_idxs < n_sessions]
+        # Always reset at the start of the first session
+        reset_idxs = [0] + reset_idxs.tolist()
+        return reset_idxs
+
     def train(
         self, mode, n_sessions=10000, n_trials=200, return_df=False, **prob_kwargs
     ):
@@ -246,6 +260,8 @@ class BanditTrainer2Arm:
         reward_probs = self._get_reward_probs(mode, N=n_sessions, **prob_kwargs)
 
         training_data = []
+        reset_idxs = self._reset_idxs(n_sessions)
+
         for session_idx in tqdm(range(n_sessions)):
             session_reward_probs = reward_probs[session_idx]
 
@@ -254,7 +270,9 @@ class BanditTrainer2Arm:
             current_input_for_model = torch.zeros(
                 (1, 1, self.input_size), device=self.device
             )
-            lstm_hidden_state = None
+
+            if session_idx in reset_idxs:
+                lstm_hidden_state = None  # reset hidden state
 
             for _ in range(n_trials):
                 policy_logits_step, _, lstm_hidden_state = self.model(
@@ -345,6 +363,7 @@ class BanditTrainer2Arm:
 
         reward_probs = self._get_reward_probs(mode, N=n_sessions, **prob_kwargs)
         evaluation_data = []
+        reset_idxs = self._reset_idxs(n_sessions)
 
         for session_idx in tqdm(range(n_sessions), mininterval=1):
             session_reward_probs = reward_probs[session_idx]
@@ -352,7 +371,9 @@ class BanditTrainer2Arm:
             current_input_for_model = torch.zeros(
                 (1, 1, self.input_size), device=self.device
             )
-            lstm_hidden_state = None
+
+            if session_idx in reset_idxs:
+                lstm_hidden_state = None
 
             for _ in range(n_trials):
                 with torch.no_grad():
