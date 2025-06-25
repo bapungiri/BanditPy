@@ -254,7 +254,13 @@ class BanditTrainer2Arm:
         return reset_idxs
 
     def train(
-        self, mode, n_sessions=10000, n_trials=200, return_df=False, **prob_kwargs
+        self,
+        mode,
+        n_sessions=10000,
+        n_trials=200,
+        return_df=False,
+        save_model=False,
+        **prob_kwargs,
     ):
         print(f"Starting training for {n_sessions} {self.train_type} sessions...")
         reward_probs = self._get_reward_probs(mode, N=n_sessions, **prob_kwargs)
@@ -343,7 +349,10 @@ class BanditTrainer2Arm:
             else float("nan")
         )
         print(f"Training complete. Final avg loss: {final_avg_loss:.4f}")
-        self.save_model()
+        self.model._is_trained = True  # 👈 mark as trained
+
+        if save_model:
+            self.save_model()
 
         if return_df:
             print("Returning training results as DataFrame.")
@@ -355,11 +364,18 @@ class BanditTrainer2Arm:
 
     def evaluate(self, mode, n_sessions=200, n_trials=200, **prob_kwargs):
         print("Starting evaluation with fixed weights...")
-        try:
-            self.load_model()  # Loads model and sets to eval mode
-        except FileNotFoundError:
-            print(f"Evaluation failed: Model file not found at {self.model_path}.")
-            return pd.DataFrame()
+        # try:
+        #     self.load_model()  # Loads model and sets to eval mode
+        # except FileNotFoundError:
+        #     print(f"Evaluation failed: Model file not found at {self.model_path}.")
+        #     return pd.DataFrame()
+
+        if not hasattr(self.model, "_is_trained") or not self.model._is_trained:
+            try:
+                self.load_model()
+            except FileNotFoundError:
+                print(f"Evaluation failed: Model file not found at {self.model_path}.")
+                return pd.DataFrame()
 
         reward_probs = self._get_reward_probs(mode, N=n_sessions, **prob_kwargs)
         evaluation_data = []
