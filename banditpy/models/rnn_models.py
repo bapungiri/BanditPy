@@ -432,7 +432,9 @@ class BanditTrainer2Arm:
         Loads the model state dict and training loss history.
         """
         if os.path.exists(self.model_path):
-            checkpoint = torch.load(self.model_path, map_location=self.device)
+            checkpoint = torch.load(
+                self.model_path, map_location=self.device, weights_only=False
+            )
 
             # Load model state dict
             self.model.load_state_dict(checkpoint["model_state_dict"])
