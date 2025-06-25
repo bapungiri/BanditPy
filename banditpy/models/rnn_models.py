@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import random
 import os
-import math  # Ensure math is imported for PaperBanditLSTM
+import math
 from tqdm import tqdm
 
 
@@ -260,6 +260,7 @@ class BanditTrainer2Arm:
         n_trials=200,
         return_df=False,
         save_model=False,
+        progress_bar=True,
         **prob_kwargs,
     ):
         print(f"Starting training for {n_sessions} {self.train_type} sessions...")
@@ -268,7 +269,7 @@ class BanditTrainer2Arm:
         training_data = []
         reset_idxs = self._reset_idxs(n_sessions)
 
-        for session_idx in tqdm(range(n_sessions)):
+        for session_idx in tqdm(range(n_sessions), disable=not progress_bar):
             session_reward_probs = reward_probs[session_idx]
 
             input_tensors_for_update, model_actions_taken, rewards_received = [], [], []
@@ -362,7 +363,9 @@ class BanditTrainer2Arm:
             # print("Training results not returned as DataFrame.")
             return None
 
-    def evaluate(self, mode, n_sessions=200, n_trials=200, **prob_kwargs):
+    def evaluate(
+        self, mode, n_sessions=200, n_trials=200, progress_bar=True, **prob_kwargs
+    ):
         print("Starting evaluation with fixed weights...")
         # try:
         #     self.load_model()  # Loads model and sets to eval mode
@@ -381,7 +384,7 @@ class BanditTrainer2Arm:
         evaluation_data = []
         reset_idxs = self._reset_idxs(n_sessions)
 
-        for session_idx in tqdm(range(n_sessions), mininterval=1):
+        for session_idx in tqdm(range(n_sessions), disable=not progress_bar):
             session_reward_probs = reward_probs[session_idx]
 
             current_input_for_model = torch.zeros(
