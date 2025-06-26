@@ -203,7 +203,7 @@ class BanditTrainer2Arm:
             )
 
         # Ensure probabilities are valid
-        if np.all(p_arm1 <= 1) and np.all(p_arm2 >= 1):
+        if ~(np.all(p_arm1 <= 1) and np.all(p_arm2 <= 1)):
             raise ValueError("Reward probabilities must be between 0 and 1.")
 
         return np.array([p_arm1, p_arm2]).T  # Index 0 for arm 1, index 1 for arm 2
