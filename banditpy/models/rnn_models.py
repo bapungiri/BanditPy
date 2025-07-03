@@ -124,7 +124,7 @@ class BanditTrainer2Arm:
         num_model_actions=2,  # Model outputs Q-values for 2 actions (0, 1)
         lr=0.00004,
         gamma=0.9,
-        beta_entropy=0.05,
+        beta_entropy=0.045,
         beta_value=0.025,
         model_path="two_arm_task_model.pt",
         device=None,
@@ -244,7 +244,7 @@ class BanditTrainer2Arm:
         Generates indices at which to reset the LSTM hidden state.
         Mimics animal training where animals may do 3, 4, or 5 sessions before a break.
         """
-        reset_freq = np.array([3, 4, 5])  # Every 3, 4, or 5 sessions
+        reset_freq = np.array([1, 2, 3])  # Every 3, 4, or 5 sessions
         reset_idxs = np.cumsum(
             np.random.choice(reset_freq, size=n_sessions // reset_freq.min())
         )
