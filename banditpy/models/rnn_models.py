@@ -242,9 +242,9 @@ class BanditTrainer2Arm:
     def _reset_idxs(self, n_sessions):
         """
         Generates indices at which to reset the LSTM hidden state.
-        Mimics animal training where animals may do 3, 4, or 5 sessions before a break.
+        Mimics animal training where animals may do 1, 2, or 3 sessions before a break.
         """
-        reset_freq = np.array([1, 2, 3])  # Every 3, 4, or 5 sessions
+        reset_freq = np.array([1, 2, 3])  # Every 1, 2, or 3 sessions
         reset_idxs = np.cumsum(
             np.random.choice(reset_freq, size=n_sessions // reset_freq.min())
         )
