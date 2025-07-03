@@ -384,6 +384,7 @@ class BanditTrainer2Arm:
         evaluation_data = []
         reset_idxs = self._reset_idxs(n_sessions)
 
+        session_group = 0
         for session_idx in tqdm(range(n_sessions), disable=not progress_bar):
             session_reward_probs = reward_probs[session_idx]
 
@@ -393,6 +394,7 @@ class BanditTrainer2Arm:
 
             if session_idx in reset_idxs:
                 lstm_hidden_state = None
+                session_group += 1  # Increment session_group for each reset
 
             for _ in range(n_trials):
                 with torch.no_grad():
@@ -414,6 +416,7 @@ class BanditTrainer2Arm:
                 evaluation_data.append(
                     {
                         "session_id": session_idx + 1,
+                        "session_group": session_group,
                         "chosen_action": env_action,
                         "reward": reward,
                         "arm1_reward_prob": session_reward_probs[0],
