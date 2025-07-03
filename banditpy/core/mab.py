@@ -248,6 +248,39 @@ class Bandit2Arm(BanditTask):
             metadata=None,
         )
 
+    @staticmethod
+    def from_df(
+        df, probs, choices, rewards, session_ids, starts=None, stops=None, datetime=None
+    ):
+        """This function primarily written to handle data from anirudh's bandit task/processed data
+
+        Parameters
+        ----------
+        df : pandas DataFrame
+            DataFrame containing the bandit task data.
+        probs : list of str
+            List of column names in the csv file that contain the probabilities for each arm.
+        choices : str
+            Column name in the csv file that contains the choices made by the subject.
+        rewards : str
+            Column name in the csv file that contains the rewards received for each choice.
+
+        Returns
+        -------
+        _type_
+            _description_
+        """
+        return Bandit2Arm(
+            probs=df.loc[:, probs].to_numpy(),
+            choices=df[choices].to_numpy(),
+            rewards=df[rewards].to_numpy(),
+            session_ids=df[session_ids].to_numpy(),
+            starts=df[starts].to_numpy() if starts is not None else None,
+            stops=df[stops].to_numpy() if stops is not None else None,
+            datetime=df[datetime].to_numpy() if datetime is not None else None,
+            metadata=None,
+        )
+
     def trim_sessions(self, trial_start, trial_stop):
         pass
 

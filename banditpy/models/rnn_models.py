@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import random
 import os
-import math  # Ensure math is imported for PaperBanditLSTM
+import math
 from tqdm import tqdm
 
 
@@ -124,7 +124,7 @@ class BanditTrainer2Arm:
         num_model_actions=2,  # Model outputs Q-values for 2 actions (0, 1)
         lr=0.00004,
         gamma=0.9,
-        beta_entropy=0.05,
+        beta_entropy=0.045,
         beta_value=0.025,
         model_path="two_arm_task_model.pt",
         device=None,
@@ -203,7 +203,7 @@ class BanditTrainer2Arm:
             )
 
         # Ensure probabilities are valid
-        if np.all(p_arm1 <= 1) and np.all(p_arm2 >= 1):
+        if ~(np.all(p_arm1 <= 1) and np.all(p_arm2 <= 1)):
             raise ValueError("Reward probabilities must be between 0 and 1.")
 
         return np.array([p_arm1, p_arm2]).T  # Index 0 for arm 1, index 1 for arm 2
@@ -239,14 +239,37 @@ class BanditTrainer2Arm:
             G.insert(0, R_val)
         return torch.tensor(G, dtype=torch.float32, device=self.device)
 
+    def _reset_idxs(self, n_sessions):
+        """
+        Generates indices at which to reset the LSTM hidden state.
+        Mimics animal training where animals may do 1, 2, or 3 sessions before a break.
+        """
+        reset_freq = np.array([1, 2, 3])  # Every 1, 2, or 3 sessions
+        reset_idxs = np.cumsum(
+            np.random.choice(reset_freq, size=n_sessions // reset_freq.min())
+        )
+        reset_idxs = reset_idxs[reset_idxs < n_sessions]
+        # Always reset at the start of the first session
+        reset_idxs = [0] + reset_idxs.tolist()
+        return reset_idxs
+
     def train(
-        self, mode, n_sessions=10000, n_trials=200, return_df=False, **prob_kwargs
+        self,
+        mode,
+        n_sessions=10000,
+        n_trials=200,
+        return_df=False,
+        save_model=False,
+        progress_bar=True,
+        **prob_kwargs,
     ):
         print(f"Starting training for {n_sessions} {self.train_type} sessions...")
         reward_probs = self._get_reward_probs(mode, N=n_sessions, **prob_kwargs)
 
         training_data = []
-        for session_idx in tqdm(range(n_sessions)):
+        reset_idxs = self._reset_idxs(n_sessions)
+
+        for session_idx in tqdm(range(n_sessions), disable=not progress_bar):
             session_reward_probs = reward_probs[session_idx]
 
             input_tensors_for_update, model_actions_taken, rewards_received = [], [], []
@@ -254,7 +277,9 @@ class BanditTrainer2Arm:
             current_input_for_model = torch.zeros(
                 (1, 1, self.input_size), device=self.device
             )
-            lstm_hidden_state = None
+
+            if session_idx in reset_idxs:
+                lstm_hidden_state = None  # reset hidden state
 
             for _ in range(n_trials):
                 policy_logits_step, _, lstm_hidden_state = self.model(
@@ -325,7 +350,10 @@ class BanditTrainer2Arm:
             else float("nan")
         )
         print(f"Training complete. Final avg loss: {final_avg_loss:.4f}")
-        self.save_model()
+        self.model._is_trained = True  # 👈 mark as trained
+
+        if save_model:
+            self.save_model()
 
         if return_df:
             print("Returning training results as DataFrame.")
@@ -335,24 +363,38 @@ class BanditTrainer2Arm:
             # print("Training results not returned as DataFrame.")
             return None
 
-    def evaluate(self, mode, n_sessions=200, n_trials=200, **prob_kwargs):
+    def evaluate(
+        self, mode, n_sessions=200, n_trials=200, progress_bar=True, **prob_kwargs
+    ):
         print("Starting evaluation with fixed weights...")
-        try:
-            self.load_model()  # Loads model and sets to eval mode
-        except FileNotFoundError:
-            print(f"Evaluation failed: Model file not found at {self.model_path}.")
-            return pd.DataFrame()
+        # try:
+        #     self.load_model()  # Loads model and sets to eval mode
+        # except FileNotFoundError:
+        #     print(f"Evaluation failed: Model file not found at {self.model_path}.")
+        #     return pd.DataFrame()
+
+        if not hasattr(self.model, "_is_trained") or not self.model._is_trained:
+            try:
+                self.load_model()
+            except FileNotFoundError:
+                print(f"Evaluation failed: Model file not found at {self.model_path}.")
+                return pd.DataFrame()
 
         reward_probs = self._get_reward_probs(mode, N=n_sessions, **prob_kwargs)
         evaluation_data = []
+        reset_idxs = self._reset_idxs(n_sessions)
 
-        for session_idx in tqdm(range(n_sessions), mininterval=1):
+        session_group = 0
+        for session_idx in tqdm(range(n_sessions), disable=not progress_bar):
             session_reward_probs = reward_probs[session_idx]
 
             current_input_for_model = torch.zeros(
                 (1, 1, self.input_size), device=self.device
             )
-            lstm_hidden_state = None
+
+            if session_idx in reset_idxs:
+                lstm_hidden_state = None
+                session_group += 1  # Increment session_group for each reset
 
             for _ in range(n_trials):
                 with torch.no_grad():
@@ -374,6 +416,7 @@ class BanditTrainer2Arm:
                 evaluation_data.append(
                     {
                         "session_id": session_idx + 1,
+                        "session_group": session_group,
                         "chosen_action": env_action,
                         "reward": reward,
                         "arm1_reward_prob": session_reward_probs[0],
@@ -411,7 +454,9 @@ class BanditTrainer2Arm:
         Loads the model state dict and training loss history.
         """
         if os.path.exists(self.model_path):
-            checkpoint = torch.load(self.model_path, map_location=self.device)
+            checkpoint = torch.load(
+                self.model_path, map_location=self.device, weights_only=False
+            )
 
             # Load model state dict
             self.model.load_state_dict(checkpoint["model_state_dict"])
