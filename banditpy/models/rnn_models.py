@@ -261,6 +261,7 @@ class BanditTrainer2Arm:
         return_df=False,
         save_model=False,
         progress_bar=True,
+        clip_norm=1.0,
         **prob_kwargs,
     ):
         print(f"Starting training for {n_sessions} {self.train_type} sessions...")
@@ -341,7 +342,7 @@ class BanditTrainer2Arm:
             self.training_loss_history.append(loss.item())
             self.optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=clip_norm)
             self.optimizer.step()
 
         final_avg_loss = (
