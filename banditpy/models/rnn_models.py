@@ -292,10 +292,10 @@ class BanditTrainer2Arm:
 
                 prob_step = F.softmax(policy_logits_step.squeeze(0), dim=-1)
                 dist_step = torch.distributions.Categorical(prob_step)
-                model_action = dist_step.sample().item()
 
                 # Greedy action is not preferable, limits exploration
                 # model_action = torch.argmax(prob_step).item()  # Greedy action (0 or 1)
+                model_action = dist_step.sample().item()
 
                 env_action = model_action + 1  # Convert to 1 or 2
 
@@ -413,6 +413,7 @@ class BanditTrainer2Arm:
                     )
 
                 prob_step = F.softmax(policy_logits_step.squeeze(0), dim=-1)
+                # Keeping the model action deterministic for evaluation as we want to see if the model learned the optimal policy.
                 model_action = torch.argmax(prob_step).item()  # Greedy action (0 or 1)
                 # dist_step = torch.distributions.Categorical(prob_step)
                 # model_action = dist_step.sample().item()
