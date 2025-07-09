@@ -155,6 +155,9 @@ class BanditTrainer2Arm:
         self.optimizer = torch.optim.RMSprop(
             self.model.parameters(), lr=self.lr, alpha=0.99
         )
+        self.policy_loss_history = []
+        self.value_loss_history = []
+        self.entropy_bonus_history = []
         self.training_loss_history = []
 
     def _get_reward_probs(self, mode, N, low=0, high=1, decimals=1):
@@ -261,6 +264,7 @@ class BanditTrainer2Arm:
         return_df=False,
         save_model=False,
         progress_bar=True,
+        clip_norm=1.0,
         **prob_kwargs,
     ):
         print(f"Starting training for {n_sessions} {self.train_type} sessions...")
@@ -288,6 +292,9 @@ class BanditTrainer2Arm:
 
                 prob_step = F.softmax(policy_logits_step.squeeze(0), dim=-1)
                 dist_step = torch.distributions.Categorical(prob_step)
+
+                # Greedy action is not preferable, limits exploration
+                # model_action = torch.argmax(prob_step).item()  # Greedy action (0 or 1)
                 model_action = dist_step.sample().item()
 
                 env_action = model_action + 1  # Convert to 1 or 2
@@ -338,10 +345,13 @@ class BanditTrainer2Arm:
             entropy_bonus = -self.beta_entropy * dist_entropy
             loss = policy_loss + value_loss + entropy_bonus
 
+            self.policy_loss_history.append(policy_loss.item())
+            self.value_loss_history.append(value_loss.item())
+            self.entropy_bonus_history.append(entropy_bonus.item())
             self.training_loss_history.append(loss.item())
             self.optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=clip_norm)
             self.optimizer.step()
 
         final_avg_loss = (
@@ -403,9 +413,10 @@ class BanditTrainer2Arm:
                     )
 
                 prob_step = F.softmax(policy_logits_step.squeeze(0), dim=-1)
-                # model_action = torch.argmax(prob_step).item()  # Greedy action (0 or 1)
-                dist_step = torch.distributions.Categorical(prob_step)
-                model_action = dist_step.sample().item()
+                # Keeping the model action deterministic for evaluation as we want to see if the model learned the optimal policy.
+                model_action = torch.argmax(prob_step).item()  # Greedy action (0 or 1)
+                # dist_step = torch.distributions.Categorical(prob_step)
+                # model_action = dist_step.sample().item()
 
                 env_action = model_action + 1  # Convert to 1 or 2
 
@@ -437,6 +448,9 @@ class BanditTrainer2Arm:
         """
         checkpoint = {
             "model_state_dict": self.model.state_dict(),
+            "policy_loss_history": self.policy_loss_history,
+            "value_loss_history": self.value_loss_history,
+            "entropy_bonus_history": self.entropy_bonus_history,
             "training_loss_history": self.training_loss_history,
             "optimizer_state_dict": self.optimizer.state_dict(),
             "lr": self.lr,
@@ -449,42 +463,48 @@ class BanditTrainer2Arm:
         torch.save(checkpoint, self.model_path)
         print(f"Model and training history saved to {self.model_path}")
 
-    def load_model(self):
-        """
-        Loads the model state dict and training loss history.
-        """
-        if os.path.exists(self.model_path):
-            checkpoint = torch.load(
-                self.model_path, map_location=self.device, weights_only=False
-            )
+    @staticmethod
+    def load_model(model_path, device="cpu", verbose=True):
+        # device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-            # Load model state dict
-            self.model.load_state_dict(checkpoint["model_state_dict"])
-            self.model.eval()  # Ensure model is in evaluation mode after loading
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Checkpoint not found at {model_path}")
 
-            # Load training loss history
-            self.training_loss_history = checkpoint.get("training_loss_history", [])
+        checkpoint = torch.load(model_path, map_location=device)
 
-            # Optional: load optimizer state if you want to resume training
-            if "optimizer_state_dict" in checkpoint:
-                self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        input_size = checkpoint["input_size"]
+        hidden_size = checkpoint["hidden_size"]
+        beta_entropy = checkpoint.get("beta_entropy", 0.045)
+        beta_value = checkpoint.get("beta_value", 0.025)
+        gamma = checkpoint.get("gamma", 0.9)
+        lr = checkpoint.get("lr", 0.00004)
 
-            if "lr" in checkpoint:
-                self.lr = checkpoint.get("lr", [])
+        # Create trainer instance with matching config
+        trainer = BanditTrainer2Arm(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            beta_entropy=beta_entropy,
+            beta_value=beta_value,
+            gamma=gamma,
+            lr=lr,
+            model_path=model_path,
+            device=device,
+        )
 
-            if "beta_entropy" in checkpoint:
-                self.beta_entropy = checkpoint.get("beta_entropy", [])
+        # Load model weights and optimizer
+        trainer.model.load_state_dict(checkpoint["model_state_dict"])
+        trainer.model.eval()
+        if "optimizer_state_dict" in checkpoint:
+            trainer.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        trainer.policy_loss_history = checkpoint.get("policy_loss_history", [])
+        trainer.value_loss_history = checkpoint.get("value_loss_history", [])
+        trainer.entropy_bonus_history = checkpoint.get("entropy_bonus_history", [])
+        trainer.training_loss_history = checkpoint.get("training_loss_history", [])
 
-            if "beta_value" in checkpoint:
-                self.beta_value = checkpoint.get("beta_value", [])
-
-            if "beta_value" in checkpoint:
-                self.gamma = checkpoint.get("gamma", [])
-
-            print(f"Model and training history loaded from {self.model_path}")
-            print(f"Loaded {len(self.training_loss_history)} training loss values")
-        else:
-            raise FileNotFoundError(f"Model file not found at: {self.model_path}")
+        trainer.model._is_trained = True
+        if verbose:
+            print(f"Restored BanditTrainer2Arm from checkpoint: {model_path}")
+        return trainer
 
     def get_model_weights(self):
         """
