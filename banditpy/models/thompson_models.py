@@ -1,57 +1,79 @@
 import numpy as np
-from scipy.optimize import minimize
+from scipy.optimize import minimize, differential_evolution
 from scipy.stats import beta
+from banditpy.core import Bandit2Arm
 
 
 class Thompson2Arm:
-    def __init__(self, n_arms=2, n_sim=500):
-        self.n_arms = n_arms
+    def __init__(self, task: Bandit2Arm, n_sim=500):
+        self.choices = np.array(task.choices) - 1  # Convert to 0,1 format
+        self.rewards = np.array(task.rewards)
         self.n_sim = n_sim
+        self.n_arms = task.n_ports
 
-    def _initialize_agent(self, alpha0, beta0):
-        # Initialize Beta priors for each arm
-        self.alpha = np.full(self.n_arms, alpha0, dtype=float)
-        self.beta = np.full(self.n_arms, beta0, dtype=float)
-
-    def _get_choice_probs(self):
-        # Estimate choice probability by sampling from Beta posteriors
-        samples = np.random.beta(
-            self.alpha[:, None], self.beta[:, None], size=(self.n_arms, self.n_sim)
-        )
-        chosen = np.argmax(samples, axis=0)
-        return np.array([(chosen == i).mean() for i in range(self.n_arms)])
-
-    def _simulate_neg_log_likelihood(self, params, choices, rewards):
-        alpha0, beta0 = params
-        if alpha0 <= 0 or beta0 <= 0:
-            return np.inf
-
-        self._initialize_agent(alpha0, beta0)
+    def _calculate_log_likelihood(self, alpha0, beta0):
+        alpha = np.full(self.n_arms, alpha0, dtype=float)
+        beta_ = np.full(self.n_arms, beta0, dtype=float)
         neg_log_likelihood = 0
 
-        for t in range(len(choices)):
-            choice_probs = self._get_choice_probs()
-            choice = choices[t]
-            reward = rewards[t]
+        for choice, reward in zip(self.choices, self.rewards):
+            # Sample n_sim values for each arm from Beta distributions
+            samples = np.random.beta(
+                alpha[:, None], beta_[:, None], size=(self.n_arms, self.n_sim)
+            )
+            selected = np.argmax(samples, axis=0)
+            choice_prob = (selected == choice).mean()
 
-            prob = np.clip(choice_probs[choice], 1e-6, 1.0)
-            neg_log_likelihood -= np.log(prob)
+            # Avoid log(0)
+            choice_prob = np.clip(choice_prob, 1e-6, 1.0)
+            neg_log_likelihood -= np.log(choice_prob)
 
+            # Bayesian update
             if reward == 1:
-                self.alpha[choice] += 1
+                alpha[choice] += 1
             else:
-                self.beta[choice] += 1
+                beta_[choice] += 1
 
         return neg_log_likelihood
 
-    def fit(self, choices, rewards, initial_guess=(1.0, 1.0)):
-        result = minimize(
-            fun=self._simulate_neg_log_likelihood,
-            x0=initial_guess,
-            args=(choices, rewards),
-            bounds=[(0.01, 10.0), (0.01, 10.0)],
-            method="L-BFGS-B",
-        )
-        self.fitted_alpha0, self.fitted_beta0 = result.x
-        self.nll = result.fun
-        return result
+    def _objective(self, params):
+        alpha0, beta0 = params
+        if alpha0 <= 0 or beta0 <= 0:
+            return np.inf
+        return self._calculate_log_likelihood(alpha0, beta0)
+
+    def fit(self, bounds=np.array([(0.01, 10.0), (0.01, 10.0)]), n_optimize=5):
+
+        x_vec = np.zeros((n_optimize, 2))
+        nll_vec = np.zeros(n_optimize)
+
+        for i in range(n_optimize):
+            result = differential_evolution(
+                self._objective,
+                bounds=bounds,
+                strategy="best1bin",
+                maxiter=1000,
+                popsize=15,
+                tol=0.01,
+                mutation=(0.5, 1),
+                recombination=0.7,
+                seed=None,
+                disp=False,
+                polish=True,
+                init="latinhypercube",
+                updating="deferred",
+                workers=1,
+            )
+            x_vec[i] = result.x
+            nll_vec[i] = result.fun
+
+        idx_best = np.argmin(nll_vec)
+        self.alpha0, self.beta0 = x_vec[idx_best]
+        self.nll = nll_vec[idx_best]
+
+    def bic(self):
+        """Calculate the Bayesian Information Criterion."""
+        if not hasattr(self, "nll") or np.isnan(self.nll):
+            return np.nan
+        k = 2  # Number of parameters (alpha0, beta0)
+        return k * np.log(len(self.choices)) + 2 * self.nll
