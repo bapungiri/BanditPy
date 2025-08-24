@@ -125,6 +125,24 @@ class BanditTask(DataManager):
     def from_csv(cls):
         pass
 
+    def to_df(self):
+        """Convert the bandit task data to a pandas DataFrame."""
+        data = pd.DataFrame(
+            {
+                "choices": self.choices,
+                "rewards": self.rewards,
+                "session_ids": self.session_ids,
+                "starts": self.starts,
+                "stops": self.stops,
+                "datetime": self.datetime,
+            }
+        )
+
+        for i in range(self.probs.shape[1]):
+            data.insert(i + 2, f"probs_{i+1}", self.probs[:, i])
+
+        return data
+
 
 class Bandit2Arm(BanditTask):
     """
