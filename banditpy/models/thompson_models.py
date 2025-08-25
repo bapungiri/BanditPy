@@ -8,6 +8,7 @@ class Thompson2Arm:
     def __init__(self, task: Bandit2Arm):
         self.choices = np.array(task.choices) - 1  # Convert to 0,1 format
         self.rewards = np.array(task.rewards)
+        self.is_session_start = task.is_session_start
         self.n_arms = task.n_ports
         self.delta_s = None
         self.delta_f = None
@@ -29,10 +30,12 @@ class Thompson2Arm:
         beta = np.ones(self.n_arms, dtype=float)
         neg_log_likelihood = 0
 
-        for choice, reward in zip(self.choices, self.rewards):
+        for choice, reward, start_bool in zip(
+            self.choices, self.rewards, self.is_session_start
+        ):
             # Sample n_sim values for each arm from Beta distributions
             samples = np.random.beta(
-                alpha[:, None], beta[:, None], size=(self.n_arms, 1)
+                alpha[:, None], beta[:, None], size=(self.n_arms, 500)
             )
             selected = np.argmax(samples, axis=0)
             choice_prob = (selected == choice).mean()
@@ -42,8 +45,11 @@ class Thompson2Arm:
             neg_log_likelihood -= np.log(choice_prob)
 
             # forgetting factor for limited memory
-            alpha = tau * alpha
-            beta = tau * beta
+            # using only multiplicative factor makes alpha/beta zero
+            # alpha = tau * alpha
+            # beta = tau * beta
+            alpha = 1.0 + (alpha - 1.0) * tau
+            beta = 1.0 + (beta - 1.0) * tau
 
             # Bayesian update
             if reward == 1:
@@ -60,7 +66,7 @@ class Thompson2Arm:
     #     return self._calculate_log_likelihood(alpha0, beta0)
 
     def fit(
-        self, bounds=np.array([(0.01, 10.0), (0.01, 10.0), (0.5, 1)]), n_optimize=5
+        self, bounds=np.array([(0.01, 10.0), (0.01, 10.0), (0.7, 1)]), n_optimize=5
     ):
 
         x_vec = np.zeros((n_optimize, 3))
