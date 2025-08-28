@@ -26,7 +26,7 @@ class Thompson2Arm:
         self,
         task: Bandit2Arm,
         n_sim: int = 500,
-        seed: int = 12345,
+        seed: int = None,
         use_analytic: bool = False,
     ):
         self.choices = np.array(task.choices) - 1
@@ -77,7 +77,7 @@ class Thompson2Arm:
             return np.inf
 
         # Common random numbers for determinism
-        rng = np.random.default_rng(999)
+        rng = np.random.default_rng()
 
         s = np.zeros(self.n_arms)
         f = np.zeros(self.n_arms)
