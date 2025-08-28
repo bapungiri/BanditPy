@@ -30,7 +30,7 @@ class Thompson2Arm:
         use_analytic: bool = False,
     ):
         self.choices = np.array(task.choices) - 1
-        self.rewards = (np.array(task.rewards) > 0).astype(float)
+        self.rewards = task.rewards.astype(float)
         self.is_session_start = task.is_session_start.astype(bool)
         self.n_arms = task.n_ports
         assert self.n_arms == 2, "Implemented for 2 arms."
