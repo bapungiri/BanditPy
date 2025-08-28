@@ -1,209 +1,192 @@
-from pyexpat import model
 import numpy as np
-from scipy.optimize import minimize, differential_evolution
+from scipy.optimize import minimize
 from banditpy.core import Bandit2Arm
 
 
 class Thompson2Arm:
-    def __init__(self, task: Bandit2Arm):
-        self.choices = np.array(task.choices) - 1  # Convert to 0,1 format
-        self.rewards = np.array(task.rewards)
+    """
+    Two‑arm Thompson model with:
+      Discounted success / failure evidence (s_i, f_i):
+         s_i <- tau * s_i
+         f_i <- tau * f_i
+         (effective memory ≈ 1/(1 - tau))
+      Arm‑specific learning rates (lr1, lr2):
+         chosen arm i:
+            if reward=1: s_i += lr_i
+            else:        f_i += lr_i
+      Posterior parameters:
+         alpha_i = 1 + s_i
+         beta_i  = 1 + f_i
+    Session starts (is_session_start) reset s,f to 0 (so alpha,beta back to 1).
+
+    Parameters fitted: tau, lr1, lr2
+    """
+
+    def __init__(
+        self,
+        task: Bandit2Arm,
+        n_sim: int = 500,
+        seed: int = 12345,
+        use_analytic: bool = False,
+    ):
+        self.choices = np.array(task.choices) - 1
+        self.rewards = (np.array(task.rewards) > 0).astype(float)
         self.is_session_start = task.is_session_start.astype(bool)
         self.n_arms = task.n_ports
-        self.tau = None
-        self.lr1 = None
-        self.lr2 = None
-        self._base_rng = np.random.default_rng(12345)
+        assert self.n_arms == 2, "Implemented for 2 arms."
+        self.n_sim = n_sim
+        self.use_analytic = use_analytic
+        self._master_rng = np.random.default_rng(seed)
 
-    def set_params(self, lr1, lr2, tau):
-        self.lr1 = lr1
-        self.lr2 = lr2
-        self.tau = tau
+        self.tau: float | None = None
+        self.lr1: float | None = None
+        self.lr2: float | None = None
+        self.nll: float | None = None
 
-    def print_params(self):
-        print(f"Learning Rate 1: {self.lr1}")
-        print(f"Learning Rate 2: {self.lr2}")
-        print(f"Forgetting factor Tau: {self.tau}")
+    # ---------- Choice probability ----------
+    def _choice_prob(self, alpha, beta, choice, rng):
+        if self.use_analytic:
+            # P( Beta(a_c,b_c) > Beta(a_o,b_o) )
+            c = choice
+            o = 1 - choice
+            # Numerical integral (fast enough for 2 arms small calls)
+            from scipy.special import beta as Bfn, betainc
 
+            a1, b1 = alpha[c], beta[c]
+            a2, b2 = alpha[o], beta[o]
+            # Simple Gauss-Legendre quadrature
+            xs, ws = np.polynomial.legendre.leggauss(40)
+            x = 0.5 * (xs + 1)
+            w = 0.5 * ws
+            pdf1 = x ** (a1 - 1) * (1 - x) ** (b1 - 1) / Bfn(a1, b1)
+            cdf2 = betainc(a2, b2, 0, x)
+            p = np.sum(pdf1 * cdf2 * w)
+            return float(np.clip(p, 1e-6, 1 - 1e-6))
+        else:
+            samples = rng.beta(
+                alpha[:, None], beta[:, None], size=(self.n_arms, self.n_sim)
+            )
+            picked = np.argmax(samples, axis=0)
+            p = (picked == choice).mean()
+            return float(np.clip(p, 1e-6, 1 - 1e-6))
+
+    # ---------- Negative log-likelihood ----------
     def _calculate_log_likelihood(self, params):
         tau, lr1, lr2 = params
-        lr = [lr1, lr2]  # learning rates for both arms
+        if not (0 < tau <= 1) or lr1 <= 0 or lr2 <= 0:
+            return np.inf
 
-        # Initial values of alpha=1, beta=1
-        alpha = np.ones(self.n_arms, dtype=float)
-        beta = np.ones(self.n_arms, dtype=float)
-        s = np.zeros(self.n_arms, dtype=float)
-        f = np.zeros(self.n_arms, dtype=float)
-        nll = 0
+        # Common random numbers for determinism
+        rng = np.random.default_rng(999)
 
-        for choice, reward, start_bool in zip(
+        s = np.zeros(self.n_arms)
+        f = np.zeros(self.n_arms)
+        kappa = np.array([lr1, lr2])
+        nll = 0.0
+
+        for choice, reward, start_flag in zip(
             self.choices, self.rewards, self.is_session_start
         ):
-            # Sample n_sim values for each arm from Beta distributions
-            if start_bool:
-                # alpha/beta will be 1 if s/f are zeros
-                # alpha = np.ones(self.n_arms, dtype=float)
-                # beta = np.ones(self.n_arms, dtype=float)
-                s = np.zeros(self.n_arms, dtype=float)
-                f = np.zeros(self.n_arms, dtype=float)
+            if start_flag:
+                s[:] = 0.0
+                f[:] = 0.0
 
-            samples = np.random.beta(
-                alpha[:, None], beta[:, None], size=(self.n_arms, 500)
-            )
-            selected = np.argmax(samples, axis=0)
-            choice_prob = (selected == choice).mean()
+            alpha = 1 + s
+            beta = 1 + f
+            p_choose = self._choice_prob(alpha, beta, choice, rng)
+            nll -= np.log(p_choose)
 
-            # Avoid log(0)
-            choice_prob = np.clip(choice_prob, 1e-6, 1.0)
-            nll -= np.log(choice_prob)
+            # Forgetting (discount)
+            s *= tau
+            f *= tau
 
-            # ==== Various ways of updating alpha/beta ===========
-
-            # --- 1: using only multiplicative factor makes alpha/beta approach zero
-            # alpha = tau * alpha
-            # beta = tau * beta
-
-            # Bayesian update
-            # if reward == 1:
-            #     alpha[choice] += delta_s  # Success increment
-            # else:
-            #     beta[choice] += delta_f  # Failure increment
-
-            # --- 2: Using additive factor so that alpha/beta don't go to zero
-            # alpha = 1.0 + (alpha - 1.0) * tau
-            # beta = 1.0 + (beta - 1.0) * tau
-
-            # Bayesian update
-            # if reward == 1:
-            #     alpha[choice] += delta_s  # Success increment
-            # else:
-            #     beta[choice] += delta_f  # Failure increment
-
-            # --- 3: Forgetting for success/failure and updating alpha/beta with reward
-            # ---- associated learning rate for each arm
-            s = tau * s  # forgetting of successes
-            f = tau * f  # forgetting of failures
-
-            s[choice] = s[choice] + reward * lr[choice]
-            f[choice] = f[choice] + (1 - reward) * lr[choice]
-
-            alpha = 1.0 + s
-            beta = 1.0 + f
+            # Update chosen arm
+            if reward == 1.0:
+                s[choice] += kappa[choice]
+            else:
+                f[choice] += kappa[choice]
 
         return nll
 
-    # def _objective(self, params):
-    #     alpha0, beta0 = params
-    #     if alpha0 <= 0 or beta0 <= 0:
-    #         return np.inf
-    #     return self._calculate_log_likelihood(alpha0, beta0)
-
-    # def fit(self, bounds=np.array([(0.01, 1), (0.01, 10), (0.01, 10)]), n_optimize=5):
-
-    #     x_vec = np.zeros((n_optimize, 3))
-    #     nll_vec = np.zeros(n_optimize)
-
-    #     for i in range(n_optimize):
-    #         print(i)
-    #         result = differential_evolution(
-    #             self._calculate_log_likelihood,
-    #             bounds=bounds,
-    #             strategy="best1bin",
-    #             maxiter=1000,
-    #             popsize=15,
-    #             tol=0.01,
-    #             mutation=(0.5, 1),
-    #             recombination=0.7,
-    #             seed=None,
-    #             disp=False,
-    #             polish=True,
-    #             init="latinhypercube",
-    #             updating="deferred",
-    #             workers=1,
-    #         )
-    #         x_vec[i] = result.x
-    #         nll_vec[i] = result.fun
-
-    #     idx_best = np.argmin(nll_vec)
-    #     self.tau, self.lr1, self.lr2 = x_vec[idx_best]
-    #     self.nll = nll_vec[idx_best]
-
+    # ---------- Fit ----------
     def fit(
         self,
-        bounds_tau=(0.01, 1),
-        bounds_lr1=(0.01, 10),
-        bounds_lr2=(0.01, 10),
-        n_starts=3,
+        bounds_tau=(0.5, 0.999),
+        bounds_lr1=(0.01, 5.0),
+        bounds_lr2=(0.01, 5.0),
+        n_starts=10,
     ):
-        """
-        Multi-start local optimization using scipy.minimize (L-BFGS-B).
-        bounds: ((delta_s_lo, delta_s_hi), (delta_f_lo, delta_f_hi), (tau_lo, tau_hi))
-        """
-        best_val = np.inf
-        best_x = None
         bounds = [bounds_tau, bounds_lr1, bounds_lr2]
         lo = np.array([b[0] for b in bounds])
         hi = np.array([b[1] for b in bounds])
+        best_val = np.inf
+        best_x = None
+
         for _ in range(n_starts):
-            print(_)
-            x0 = lo + (hi - lo) * self._base_rng.random(3)
+            x0 = lo + (hi - lo) * self._master_rng.random(3)
             res = minimize(
                 self._calculate_log_likelihood,
                 x0,
                 method="L-BFGS-B",
                 bounds=bounds,
-                options=dict(maxiter=1000, ftol=1e-6),
+                options=dict(maxiter=400, ftol=1e-6),
             )
             if res.fun < best_val:
                 best_val = res.fun
                 best_x = res.x
+
         self.tau, self.lr1, self.lr2 = best_x
         self.nll = best_val
+        return dict(tau=self.tau, lr1=self.lr1, lr2=self.lr2, nll=self.nll)
 
-    def bic(self):
-        """Calculate the Bayesian Information Criterion."""
-        if not hasattr(self, "nll") or np.isnan(self.nll):
-            return np.nan
-        k = 3  # Number of parameters (delta_s, delta_f, tau)
-        return k * np.log(len(self.choices)) + 2 * self.nll
-
-    def simulate_posteriors(self):
-        """
-        Replay trials with fitted (delta_s, delta_f, tau) to obtain trajectories.
-        Returns:
-            alpha_traj: (T+1, n_arms)
-            beta_traj : (T+1, n_arms)
-            mean_traj : (T+1, n_arms) posterior mean per arm
-        """
-        if any(p is None for p in (self.delta_s, self.delta_f, self.tau)):
-            raise RuntimeError("Call fit() first.")
-        alpha = np.ones(self.n_arms, dtype=float)
-        beta = np.ones(self.n_arms, dtype=float)
-        alpha_traj = [alpha.copy()]
-        beta_traj = [beta.copy()]
-        for choice, reward in zip(self.choices, self.rewards):
-            # forgetting
-            alpha *= self.tau
-            beta *= self.tau
-            # update
-            if reward == 1:
-                alpha[choice] += self.delta_s
-            else:
-                beta[choice] += self.delta_f
-            alpha_traj.append(alpha.copy())
-            beta_traj.append(beta.copy())
-        alpha_traj = np.stack(alpha_traj)
-        beta_traj = np.stack(beta_traj)
-        mean_traj = alpha_traj / (alpha_traj + beta_traj)
-        return alpha_traj, beta_traj, mean_traj
-
-    def _nll_wrapper(self, x, repeats=20):
+    # ---------- Diagnostics ----------
+    def inspect_smoothness(self, repeats=20):
+        if self.tau is None:
+            raise RuntimeError("Fit first.")
+        x = np.array([self.tau, self.lr1, self.lr2])
         vals = [self._calculate_log_likelihood(x) for _ in range(repeats)]
         vals = np.array(vals)
-        return vals.mean(), vals.std(), vals.std() / np.abs(vals.mean())
+        print(
+            f"Mean NLL={vals.mean():.2f}  SD={vals.std():.3f}  CoefVar={vals.std()/vals.mean():.4f}"
+        )
 
-    def inspect_smoothness(self):
-        # Inspect the smoothness of the NLL surface around the current parameters
-        x_star = np.array([self.tau, self.lr1, self.lr2])
-        mean_f, std_f, cv_f = self._nll_wrapper(x_star, repeats=30)
-        print(f"Mean NLL={mean_f:.2f}  SD={std_f:.3f}  CoefVar={cv_f:.4f}")
+    def bic(self):
+        if self.nll is None:
+            return np.nan
+        k = 3
+        return k * np.log(len(self.choices)) + 2 * self.nll
+
+    def print_params(self):
+        print(
+            f"tau={self.tau:.4f}  lr1={self.lr1:.4f}  lr2={self.lr2:.4f}  NLL={self.nll:.2f}"
+        )
+
+    # ---------- Posterior trajectory ----------
+    def simulate_posteriors(self):
+        if self.tau is None:
+            raise RuntimeError("Fit first.")
+        s = np.zeros(self.n_arms)
+        f = np.zeros(self.n_arms)
+        alpha_traj = []
+        beta_traj = []
+        for choice, reward, start_flag in zip(
+            self.choices, self.rewards, self.is_session_start
+        ):
+            if start_flag:
+                s[:] = 0.0
+                f[:] = 0.0
+            alpha_traj.append(1 + s)
+            beta_traj.append(1 + f)
+            s *= self.tau
+            f *= self.tau
+            if reward == 1.0:
+                s[choice] += self.lr1 if choice == 0 else self.lr2
+            else:
+                f[choice] += self.lr1 if choice == 0 else self.lr2
+        # final
+        alpha_traj.append(1 + s)
+        beta_traj.append(1 + f)
+        A = np.vstack(alpha_traj)
+        B = np.vstack(beta_traj)
+        mean = A / (A + B)
+        return A, B, mean
