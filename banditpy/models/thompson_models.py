@@ -10,10 +10,15 @@ class Thompson2Arm:
         self.rewards = np.array(task.rewards)
         self.is_session_start = task.is_session_start.astype(bool)
         self.n_arms = task.n_ports
+        self.tau = None
         self.lr1 = None
         self.lr2 = None
-        self.tau = None
         self._base_rng = np.random.default_rng(12345)
+
+    def set_params(self, lr1, lr2, tau):
+        self.lr1 = lr1
+        self.lr2 = lr2
+        self.tau = tau
 
     def print_params(self):
         print(f"Learning Rate 1: {self.lr1}")
@@ -36,8 +41,9 @@ class Thompson2Arm:
         ):
             # Sample n_sim values for each arm from Beta distributions
             if start_bool:
-                alpha = np.ones(self.n_arms, dtype=float)
-                beta = np.ones(self.n_arms, dtype=float)
+                # alpha/beta will be 1 if s/f are zeros
+                # alpha = np.ones(self.n_arms, dtype=float)
+                # beta = np.ones(self.n_arms, dtype=float)
                 s = np.zeros(self.n_arms, dtype=float)
                 f = np.zeros(self.n_arms, dtype=float)
 
@@ -51,13 +57,19 @@ class Thompson2Arm:
             choice_prob = np.clip(choice_prob, 1e-6, 1.0)
             nll -= np.log(choice_prob)
 
-            # forgetting factor for limited memory
+            # ==== Various ways of updating alpha/beta ===========
 
-            # 1: using only multiplicative factor makes alpha/beta zero
+            # --- 1: using only multiplicative factor makes alpha/beta approach zero
             # alpha = tau * alpha
             # beta = tau * beta
 
-            # 2: Using additive factor so that alpha/beta don't go to zero
+            # Bayesian update
+            # if reward == 1:
+            #     alpha[choice] += delta_s  # Success increment
+            # else:
+            #     beta[choice] += delta_f  # Failure increment
+
+            # --- 2: Using additive factor so that alpha/beta don't go to zero
             # alpha = 1.0 + (alpha - 1.0) * tau
             # beta = 1.0 + (beta - 1.0) * tau
 
@@ -67,6 +79,8 @@ class Thompson2Arm:
             # else:
             #     beta[choice] += delta_f  # Failure increment
 
+            # --- 3: Forgetting for success/failure and updating alpha/beta with reward
+            # ---- associated learning rate for each arm
             s = tau * s  # forgetting of successes
             f = tau * f  # forgetting of failures
 
@@ -114,13 +128,20 @@ class Thompson2Arm:
     #     self.tau, self.lr1, self.lr2 = x_vec[idx_best]
     #     self.nll = nll_vec[idx_best]
 
-    def fit(self, bounds=((0.01, 1), (0.01, 10), (0.01, 10)), n_starts=3):
+    def fit(
+        self,
+        bounds_tau=(0.01, 1),
+        bounds_lr1=(0.01, 10),
+        bounds_lr2=(0.01, 10),
+        n_starts=3,
+    ):
         """
         Multi-start local optimization using scipy.minimize (L-BFGS-B).
         bounds: ((delta_s_lo, delta_s_hi), (delta_f_lo, delta_f_hi), (tau_lo, tau_hi))
         """
         best_val = np.inf
         best_x = None
+        bounds = [bounds_tau, bounds_lr1, bounds_lr2]
         lo = np.array([b[0] for b in bounds])
         hi = np.array([b[1] for b in bounds])
         for _ in range(n_starts):
@@ -176,14 +197,13 @@ class Thompson2Arm:
         mean_traj = alpha_traj / (alpha_traj + beta_traj)
         return alpha_traj, beta_traj, mean_traj
 
-    def obj_wrapper(self, x, repeats=20):
+    def _nll_wrapper(self, x, repeats=20):
         vals = [self._calculate_log_likelihood(x) for _ in range(repeats)]
         vals = np.array(vals)
         return vals.mean(), vals.std(), vals.std() / np.abs(vals.mean())
 
-    def assess_smoothness(self):
-
-        # Current best params
-        x_star = np.array([self.delta_s, self.delta_f, self.tau])
-        mean_f, std_f, cv_f = self.obj_wrapper(x_star, repeats=30)
+    def inspect_smoothness(self):
+        # Inspect the smoothness of the NLL surface around the current parameters
+        x_star = np.array([self.tau, self.lr1, self.lr2])
+        mean_f, std_f, cv_f = self._nll_wrapper(x_star, repeats=30)
         print(f"Mean NLL={mean_f:.2f}  SD={std_f:.3f}  CoefVar={cv_f:.4f}")
