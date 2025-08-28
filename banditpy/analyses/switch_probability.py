@@ -61,13 +61,15 @@ class SwitchProb2Arm:
         # Calculate switches (change in choices)
         switches = np.diff(self.task.choices, prepend=self.task.choices[0]) != 0
 
-        # convert to 2D array of shape (n_sessions, n_trials)
-        switches = pd.DataFrame(
-            np.split(switches, np.cumsum(self.task.ntrials_session)[:-1])
-        ).to_numpy()
+        # convert to 2D array of shape (n_sessions, n_trials) and calculate switch probability across sessions and ignore the first trial
+        switch_prob = (
+            pd.DataFrame(np.split(switches, np.cumsum(self.task.ntrials_session)[:-1]))
+            .mean(axis=0)
+            .to_numpy()[1:]
+        )
 
         # Calculate switch probability across session and ignore the first trial
-        switch_prob = np.nanmean(switches, axis=0)[1:]
+        # switch_prob = np.nanmean(switches, axis=0)[1:]
 
         return switch_prob
 
