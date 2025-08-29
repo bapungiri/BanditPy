@@ -90,8 +90,8 @@ class Thompson2Arm:
                 s[:] = 0.0
                 f[:] = 0.0
 
-            alpha = alpha0 + s
-            beta = beta0 + f
+            alpha = np.maximum(alpha0 + s, alpha0)
+            beta = np.maximum(beta0 + f, beta0)
             p_choose = self._choice_prob(alpha, beta, choice, rng)
             nll -= np.log(p_choose)
 
@@ -102,21 +102,21 @@ class Thompson2Arm:
             # Update chosen and unchosen arms
             if reward == 1.0:
                 s[choice] += lr_chosen
-                s[1 - choice] += lr_unchosen
+                f[1 - choice] += lr_unchosen
             else:
                 f[choice] += lr_chosen
-                f[1 - choice] += lr_unchosen
+                s[1 - choice] += lr_unchosen
 
         return nll
 
     # ---------- Fit ----------
     def fit(
         self,
-        alpha0=(2, 10),
-        beta0=(2, 10),
-        lr_chosen=(-1, 1),
-        lr_unchosen=(-1, 1),
-        tau=(0, 1),
+        alpha0=(1, 10),
+        beta0=(1, 10),
+        lr_chosen=(0.01, 1),
+        lr_unchosen=(0.01, 1),
+        tau=(0.1, 1),
         n_starts=10,
     ):
         bounds = [alpha0, beta0, lr_chosen, lr_unchosen, tau]
@@ -153,7 +153,9 @@ class Thompson2Arm:
     def inspect_smoothness(self, repeats=20):
         if self.tau is None:
             raise RuntimeError("Fit first.")
-        x = np.array([self.tau, self.lr1, self.lr2])
+        x = np.array(
+            [self.alpha0, self.beta0, self.lr_chosen, self.lr_unchosen, self.tau]
+        )
         vals = [self._calculate_log_likelihood(x) for _ in range(repeats)]
         vals = np.array(vals)
         print(
@@ -171,10 +173,19 @@ class Thompson2Arm:
             f"alpha0={self.alpha0:.4f}, beta0={self.beta0:.4f}, lr_chosen={self.lr_chosen:.4f},  lr_unchosen={self.lr_unchosen:.4f}, tau={self.tau:.4f}, NLL={self.nll:.2f}"
         )
 
-    # ---------- Posterior trajectory ----------
+    # ---------- simulate posterior ----------
     def simulate_posteriors(self):
-        if self.tau is None:
-            raise RuntimeError("Fit first.")
+        if any(
+            p is None
+            for p in (
+                self.alpha0,
+                self.beta0,
+                self.lr_chosen,
+                self.lr_unchosen,
+                self.tau,
+            )
+        ):
+            raise RuntimeError("Call fit() first.")
         s = np.zeros(self.n_arms)
         f = np.zeros(self.n_arms)
         alpha_traj = []
@@ -185,17 +196,20 @@ class Thompson2Arm:
             if start_flag:
                 s[:] = 0.0
                 f[:] = 0.0
-            alpha_traj.append(1 + s)
-            beta_traj.append(1 + f)
+            alpha_traj.append(self.alpha0 + s)
+            beta_traj.append(self.beta0 + f)
             s *= self.tau
             f *= self.tau
             if reward == 1.0:
-                s[choice] += self.lr1 if choice == 0 else self.lr2
+                s[choice] += self.lr_chosen
+                if self.lr_unchosen > 0:
+                    s[1 - choice] += self.lr_unchosen
             else:
-                f[choice] += self.lr1 if choice == 0 else self.lr2
-        # final
-        alpha_traj.append(1 + s)
-        beta_traj.append(1 + f)
+                f[choice] += self.lr_chosen
+                if self.lr_unchosen > 0:
+                    f[1 - choice] += self.lr_unchosen
+        alpha_traj.append(self.alpha0 + s)
+        beta_traj.append(self.beta0 + f)
         A = np.vstack(alpha_traj)
         B = np.vstack(beta_traj)
         mean = A / (A + B)
