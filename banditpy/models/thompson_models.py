@@ -76,9 +76,6 @@ class Thompson2Arm:
     def _calculate_log_likelihood(self, params):
         alpha0, beta0, lr_chosen, lr_unchosen, tau = params
 
-        if not (0 < tau <= 1) or lr_chosen <= 0 or lr_unchosen <= 0:
-            return np.inf
-
         # Common random numbers for determinism
         rng = np.random.default_rng()
 
