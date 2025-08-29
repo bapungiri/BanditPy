@@ -112,8 +112,8 @@ class Thompson2Arm:
     # ---------- Fit ----------
     def fit(
         self,
-        alpha0=(1, 10),
-        beta0=(1, 10),
+        alpha0=(2, 10),
+        beta0=(2, 10),
         lr_chosen=(-1, 1),
         lr_unchosen=(-1, 1),
         tau=(0, 1),
