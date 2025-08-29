@@ -26,7 +26,7 @@ class Thompson2Arm:
         self,
         task: Bandit2Arm,
         n_sim: int = 500,
-        seed: int = 12345,
+        seed: int = None,
         use_analytic: bool = False,
     ):
         self.choices = np.array(task.choices) - 1
@@ -38,9 +38,11 @@ class Thompson2Arm:
         self.use_analytic = use_analytic
         self._master_rng = np.random.default_rng(seed)
 
+        self.a0: float | None = None
+        self.b0: float | None = None
+        self.lr_chosen: float | None = None
+        self.lr_unchosen: float | None = None
         self.tau: float | None = None
-        self.lr1: float | None = None
-        self.lr2: float | None = None
         self.nll: float | None = None
 
     # ---------- Choice probability ----------
@@ -72,16 +74,13 @@ class Thompson2Arm:
 
     # ---------- Negative log-likelihood ----------
     def _calculate_log_likelihood(self, params):
-        tau, lr1, lr2 = params
-        if not (0 < tau <= 1) or lr1 <= 0 or lr2 <= 0:
-            return np.inf
+        alpha0, beta0, lr_chosen, lr_unchosen, tau = params
 
         # Common random numbers for determinism
-        rng = np.random.default_rng(999)
+        rng = np.random.default_rng()
 
         s = np.zeros(self.n_arms)
         f = np.zeros(self.n_arms)
-        kappa = np.array([lr1, lr2])
         nll = 0.0
 
         for choice, reward, start_flag in zip(
@@ -91,8 +90,8 @@ class Thompson2Arm:
                 s[:] = 0.0
                 f[:] = 0.0
 
-            alpha = 1 + s
-            beta = 1 + f
+            alpha = np.maximum(alpha0 + s, alpha0)
+            beta = np.maximum(beta0 + f, beta0)
             p_choose = self._choice_prob(alpha, beta, choice, rng)
             nll -= np.log(p_choose)
 
@@ -100,30 +99,34 @@ class Thompson2Arm:
             s *= tau
             f *= tau
 
-            # Update chosen arm
+            # Update chosen and unchosen arms
             if reward == 1.0:
-                s[choice] += kappa[choice]
+                s[choice] += lr_chosen
+                f[1 - choice] += lr_unchosen
             else:
-                f[choice] += kappa[choice]
+                f[choice] += lr_chosen
+                s[1 - choice] += lr_unchosen
 
         return nll
 
     # ---------- Fit ----------
     def fit(
         self,
-        bounds_tau=(0.5, 0.999),
-        bounds_lr1=(0.01, 5.0),
-        bounds_lr2=(0.01, 5.0),
+        alpha0=(1, 10),
+        beta0=(1, 10),
+        lr_chosen=(0.01, 1),
+        lr_unchosen=(0.01, 1),
+        tau=(0.1, 1),
         n_starts=10,
     ):
-        bounds = [bounds_tau, bounds_lr1, bounds_lr2]
+        bounds = [alpha0, beta0, lr_chosen, lr_unchosen, tau]
         lo = np.array([b[0] for b in bounds])
         hi = np.array([b[1] for b in bounds])
         best_val = np.inf
         best_x = None
 
         for _ in range(n_starts):
-            x0 = lo + (hi - lo) * self._master_rng.random(3)
+            x0 = lo + (hi - lo) * self._master_rng.random(5)
             res = minimize(
                 self._calculate_log_likelihood,
                 x0,
@@ -135,15 +138,24 @@ class Thompson2Arm:
                 best_val = res.fun
                 best_x = res.x
 
-        self.tau, self.lr1, self.lr2 = best_x
+        self.alpha0, self.beta0, self.lr_chosen, self.lr_unchosen, self.tau = best_x
         self.nll = best_val
-        return dict(tau=self.tau, lr1=self.lr1, lr2=self.lr2, nll=self.nll)
+        return dict(
+            alpha0=self.alpha0,
+            beta0=self.beta0,
+            lr_chosen=self.lr_chosen,
+            lr_unchosen=self.lr_unchosen,
+            tau=self.tau,
+            nll=self.nll,
+        )
 
     # ---------- Diagnostics ----------
     def inspect_smoothness(self, repeats=20):
         if self.tau is None:
             raise RuntimeError("Fit first.")
-        x = np.array([self.tau, self.lr1, self.lr2])
+        x = np.array(
+            [self.alpha0, self.beta0, self.lr_chosen, self.lr_unchosen, self.tau]
+        )
         vals = [self._calculate_log_likelihood(x) for _ in range(repeats)]
         vals = np.array(vals)
         print(
@@ -153,18 +165,27 @@ class Thompson2Arm:
     def bic(self):
         if self.nll is None:
             return np.nan
-        k = 3
+        k = 5
         return k * np.log(len(self.choices)) + 2 * self.nll
 
     def print_params(self):
         print(
-            f"tau={self.tau:.4f}  lr1={self.lr1:.4f}  lr2={self.lr2:.4f}  NLL={self.nll:.2f}"
+            f"alpha0={self.alpha0:.4f}, beta0={self.beta0:.4f}, lr_chosen={self.lr_chosen:.4f},  lr_unchosen={self.lr_unchosen:.4f}, tau={self.tau:.4f}, NLL={self.nll:.2f}"
         )
 
-    # ---------- Posterior trajectory ----------
+    # ---------- simulate posterior ----------
     def simulate_posteriors(self):
-        if self.tau is None:
-            raise RuntimeError("Fit first.")
+        if any(
+            p is None
+            for p in (
+                self.alpha0,
+                self.beta0,
+                self.lr_chosen,
+                self.lr_unchosen,
+                self.tau,
+            )
+        ):
+            raise RuntimeError("Call fit() first.")
         s = np.zeros(self.n_arms)
         f = np.zeros(self.n_arms)
         alpha_traj = []
@@ -175,17 +196,20 @@ class Thompson2Arm:
             if start_flag:
                 s[:] = 0.0
                 f[:] = 0.0
-            alpha_traj.append(1 + s)
-            beta_traj.append(1 + f)
+            alpha_traj.append(self.alpha0 + s)
+            beta_traj.append(self.beta0 + f)
             s *= self.tau
             f *= self.tau
             if reward == 1.0:
-                s[choice] += self.lr1 if choice == 0 else self.lr2
+                s[choice] += self.lr_chosen
+                if self.lr_unchosen > 0:
+                    s[1 - choice] += self.lr_unchosen
             else:
-                f[choice] += self.lr1 if choice == 0 else self.lr2
-        # final
-        alpha_traj.append(1 + s)
-        beta_traj.append(1 + f)
+                f[choice] += self.lr_chosen
+                if self.lr_unchosen > 0:
+                    f[1 - choice] += self.lr_unchosen
+        alpha_traj.append(self.alpha0 + s)
+        beta_traj.append(self.beta0 + f)
         A = np.vstack(alpha_traj)
         B = np.vstack(beta_traj)
         mean = A / (A + B)
