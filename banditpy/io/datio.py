@@ -46,6 +46,7 @@ def dat2ArmIO(folder: Path) -> Bandit2Arm:
     behav = outcomes.loc[
         :, ["port", "reward", "p1", "p2", "session_id", "datetime"]
     ].reset_index(drop=True)
+    behav[behav["reward"].isin([0, 1])]
 
     return Bandit2Arm(
         probs=behav[["p1", "p2"]].to_numpy(),
