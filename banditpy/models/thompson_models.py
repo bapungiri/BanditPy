@@ -5,21 +5,47 @@ from banditpy.core import Bandit2Arm
 
 class Thompson2Arm:
     """
-    Two‑arm Thompson model with:
-      Discounted success / failure evidence (s_i, f_i):
-         s_i <- tau * s_i
-         f_i <- tau * f_i
-         (effective memory ≈ 1/(1 - tau))
-      Arm‑specific learning rates (lr1, lr2):
-         chosen arm i:
-            if reward=1: s_i += lr_i
-            else:        f_i += lr_i
-      Posterior parameters:
-         alpha_i = 1 + s_i
-         beta_i  = 1 + f_i
-    Session starts (is_session_start) reset s,f to 0 (so alpha,beta back to 1).
+    Two-arm Thompson sampling model with discounted success/failure evidence and separate learning rates for chosen and unchosen arms.
 
-    Parameters fitted: tau, lr1, lr2
+    Model logic:
+      - For each trial, maintain discounted counts of successes (s_i) and failures (f_i) for each arm i.
+      - At each trial, apply exponential forgetting:
+            s_i <- tau * s_i
+            f_i <- tau * f_i
+        where tau ∈ (0, 1) controls the memory horizon (higher tau = longer memory).
+      - Update chosen and unchosen arms:
+        * If reward == 1:
+            - Chosen arm: s_chosen += lr_chosen
+            - Unchosen arm: s_unchosen += lr_unchosen
+        * If reward == 0:
+            - Chosen arm: f_chosen += lr_chosen
+            - Unchosen arm: f_unchosen += lr_unchosen
+        (If lr_unchosen = 0, unchosen arm is not updated.)
+      - Posterior Beta parameters for each arm:
+            alpha_i = alpha0 + s_i
+            beta_i  = beta0 + f_i
+        where alpha0, beta0 > 0 are prior parameters.
+      - At session start (is_session_start), reset s_i and f_i to zero for both arms.
+
+    Parameters fitted:
+      - alpha0: prior success count (>0)
+      - beta0: prior failure count (>0)
+      - lr_chosen: learning rate for chosen arm (>0)
+      - lr_unchosen: learning rate for unchosen arm (≥0)
+      - tau: forgetting factor (0 < tau < 1)
+
+    Choice probability:
+      - At each trial, compute P(choice) using either Monte Carlo Thompson sampling or analytic Beta comparison.
+
+    Simulation:
+      - The simulate_posteriors() method returns the trajectory of alpha/beta parameters and posterior means for each arm over trials.
+
+    Effective memory horizon:
+      - Approximately 1/(1 - tau)
+
+    Notes:
+      - Setting lr_unchosen = 0 disables fictive updates for the unchosen arm.
+      - All parameters are constrained to valid ranges during fitting.
     """
 
     def __init__(
@@ -101,11 +127,11 @@ class Thompson2Arm:
 
             # Update chosen and unchosen arms
             if reward == 1.0:
-                s[choice] += lr_chosen
-                f[1 - choice] += lr_unchosen
+                s[choice] += lr_chosen  # update success of chosen
+                f[1 - choice] += lr_unchosen  # update failure of unchosen
             else:
-                f[choice] += lr_chosen
-                s[1 - choice] += lr_unchosen
+                f[choice] += lr_chosen  # update failure of chosen
+                s[1 - choice] += lr_unchosen  # update success of unchosen
 
         return nll
 
