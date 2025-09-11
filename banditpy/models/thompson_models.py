@@ -25,7 +25,7 @@ class Thompson2Arm:
             alpha_i = alpha0 + s_i
             beta_i  = beta0 + f_i
         where alpha0, beta0 > 0 are prior parameters.
-      - At session start (is_session_start), reset s_i and f_i to zero for both arms.
+      - At reset_bool (Example: session_start, window_start), reset s_i and f_i to zero for both arms.
 
     Parameters fitted:
       - alpha0: prior success count (>0)
@@ -51,13 +51,19 @@ class Thompson2Arm:
     def __init__(
         self,
         task: Bandit2Arm,
+        reset_bool: bool = None,  # Flags for resetting s and f, default session_start
         n_sim: int = 500,
         seed: int = None,
         use_analytic: bool = False,
     ):
-        self.choices = np.array(task.choices) - 1
+        self.choices = np.array(task.choices) - 1  # 0-based
         self.rewards = task.rewards.astype(float)
-        self.is_session_start = task.is_session_start.astype(bool)
+
+        if reset_bool is None:
+            self.reset_bool = task.is_session_start.astype(bool)
+        else:
+            self.reset_bool = np.array(reset_bool).astype(bool)
+
         self.n_arms = task.n_ports
         assert self.n_arms == 2, "Implemented for 2 arms."
         self.n_sim = n_sim
@@ -109,10 +115,8 @@ class Thompson2Arm:
         f = np.zeros(self.n_arms)
         nll = 0.0
 
-        for choice, reward, start_flag in zip(
-            self.choices, self.rewards, self.is_session_start
-        ):
-            if start_flag:
+        for choice, reward, reset in zip(self.choices, self.rewards, self.reset_bool):
+            if reset:
                 s[:] = 0.0
                 f[:] = 0.0
 
