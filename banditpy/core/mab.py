@@ -15,6 +15,8 @@ class BanditTask(DataManager):
         choices,
         rewards,
         session_ids,
+        block_ids=None,
+        window_ids=None,
         starts=None,
         stops=None,
         datetime=None,
@@ -44,6 +46,8 @@ class BanditTask(DataManager):
         else:
             self.stops = None
 
+        self.window_ids = window_ids
+        self.block_ids = block_ids
         self.datetime = datetime
 
         self.sessions, self.ntrials_session = np.unique(
@@ -88,6 +92,14 @@ class BanditTask(DataManager):
         session_starts = np.clip(session_starts, 0, 1)
         session_starts[0] = 1
         return session_starts.astype(bool)
+
+    @property
+    def is_window_start(self):
+        assert self.window_ids is not None, "window_ids must be set"
+        window_starts = np.diff(self.window_ids, prepend=self.window_ids[0])
+        window_starts = np.clip(window_starts, 0, 1)
+        window_starts[0] = 1
+        return window_starts.astype(bool)
 
     def filter_by_trials(self, min_trials=100, clip_max=None):
         valid_sessions = self.sessions[self.ntrials_session >= min_trials]
@@ -142,6 +154,48 @@ class BanditTask(DataManager):
             data.insert(i + 2, f"probs_{i+1}", self.probs[:, i])
 
         return data
+
+    def auto_block_window_ids(self, time_window_min=40):
+        """
+        Auto-generate window_ids and block_ids for each trial.
+
+        - A block is defined as a contiguous set of trials with fixed reward probabilities.
+        - block_ids reset to 1 at the start of each experiment window (e.g., 40-min period).
+        - session_ids are global and unique for each reward probability combination (do not reset).
+
+        Parameters
+        ----------
+        time_window_min : int
+            Time window in minutes for splitting blocks by datetime.
+
+        Returns
+        -------
+        block_ids : np.ndarray
+            Array of block IDs for each trial (starts at 1 for each experiment window).
+        window_ids : np.ndarray
+            Array of window IDs for each trial (starts at 1 for first window).
+        """
+        n_trials = len(self.probs)
+        session_ids = self.session_ids
+        block_ids = np.zeros(n_trials, dtype=int)
+        window_ids = np.zeros(n_trials, dtype=int)
+
+        # If datetime is provided, split windows by time gaps > time_window_min
+        assert (
+            self.datetime is not None
+        ), "Datetime must be provided for window splitting."
+        dt = pd.to_datetime(self.datetime)
+        gap = np.diff(dt, prepend=dt[0]).total_seconds() / 60
+        window_starts_bool = gap > time_window_min
+        window_starts_bool[0] = 1  # Ensure first trial is a window start
+        window_ids = np.cumsum(window_starts_bool)
+
+        _, counts = np.unique(window_ids, return_counts=True)
+        chunks = np.split(session_ids, np.cumsum(counts)[:-1])
+        block_ids = np.concatenate([chunk - chunk[0] + 1 for chunk in chunks])
+
+        self.block_ids = block_ids
+        self.window_ids = window_ids
 
 
 class Bandit2Arm(BanditTask):
