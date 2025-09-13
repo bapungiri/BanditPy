@@ -7,7 +7,83 @@ from numpy.lib.stride_tricks import sliding_window_view
 
 
 class BanditTask(DataManager):
-    """Base class for bandit tasks"""
+    """
+    Base class for multi-armed bandit task data.
+
+    Structure:
+    ----------
+    - Each trial contains: reward probabilities (probs), choices, rewards, session_ids, and optionally block_ids, window_ids, start/stop indices, and datetimes.
+    - Trials are grouped into sessions (session_ids), blocks (block_ids), and windows (window_ids) for flexible analysis.
+
+    Parameters
+    ----------
+    probs : np.ndarray
+        Array of shape (n_trials, n_arms) with reward probabilities for each arm at each trial.
+    choices : np.ndarray
+        Array of shape (n_trials,) with chosen arm indices (1-based).
+    rewards : np.ndarray
+        Array of shape (n_trials,) with reward outcomes for each trial.
+    session_ids : np.ndarray
+        Array of shape (n_trials,) with session identifiers (monotonically increasing, unique for each reward probability combination).
+    block_ids : np.ndarray, optional
+        Array of shape (n_trials,) with block identifiers (reset to 1 at the start of each experiment window, increment for each uncued reward probability change).
+    window_ids : np.ndarray, optional
+        Array of shape (n_trials,) with window identifiers.
+    starts : np.ndarray, optional
+        Array of shape (n_trials,) indicating trial start indices.
+    stops : np.ndarray, optional
+        Array of shape (n_trials,) indicating trial stop indices.
+    datetime : np.ndarray, optional
+        Array of shape (n_trials,) with datetime information for each trial.
+    metadata : dict, optional
+        Dictionary of additional metadata.
+
+    Key Properties
+    --------------
+    n_ports : int
+        Number of arms in the bandit task.
+    n_trials : int
+        Number of trials in the dataset.
+    mean_ntrials, min_ntrials, max_ntrials : float/int
+        Statistics on number of trials per session.
+    n_sessions : int
+        Number of unique sessions.
+    sessions : np.ndarray
+        Unique session IDs.
+    ntrials_session : np.ndarray
+        Number of trials per session.
+    is_session_start : np.ndarray
+        Boolean array, True at the start of each session.
+    is_window_start : np.ndarray
+        Boolean array, True at the start of each window (requires window_ids).
+
+    Methods
+    -------
+    filter_by_trials(min_trials=100, clip_max=None)
+        Filter sessions by minimum number of trials and optionally clip to max trials per session.
+    filter_by_session_id(ids)
+        Filter trials by session IDs.
+    to_df()
+        Convert the bandit task data to a pandas DataFrame.
+    auto_block_window_ids(time_window_min=40)
+        Auto-generate block_ids and window_ids using datetime and reward probability changes.
+    _filtered(mask)
+        Return a new BanditTask instance with filtered data.
+
+    Usage Example
+    -------------
+    >>> task = BanditTask(probs, choices, rewards, session_ids, datetime=datetimes)
+    >>> block_ids, window_ids = task.auto_block_window_ids(time_window_min=40)
+    >>> df = task.to_df()
+    >>> filtered_task = task.filter_by_trials(min_trials=50)
+
+    Notes
+    -----
+    - session_ids should be unique for each reward probability combination and increment globally.
+    - block_ids reset at the start of each window and increment for each uncued reward probability change.
+    - window_ids reset at the start of each experiment window (e.g., every 40 minutes).
+    - Use is_session_start, is_window_start for custom resetting logic in models.
+    """
 
     def __init__(
         self,
@@ -209,23 +285,35 @@ class Bandit2Arm(BanditTask):
         choices,
         rewards,
         session_ids,
+        block_ids=None,
+        window_ids=None,
         starts=None,
         stops=None,
         datetime=None,
         metadata=None,
     ):
-
         super().__init__(
             probs=probs,
             choices=choices,
             rewards=rewards,
             session_ids=session_ids,
+            block_ids=block_ids,
+            window_ids=window_ids,
             starts=starts,
             stops=stops,
             datetime=datetime,
             metadata=metadata,
         )
         assert self.n_ports == 2, "TwoArmedBandit requires exactly 2 arms"
+
+    @property
+    def is_block_start(self):
+        """Boolean array, True at the start of each block. Requires block_ids."""
+        assert self.block_ids is not None, "block_ids must be set"
+        block_starts = np.diff(self.block_ids, prepend=self.block_ids[0])
+        block_starts = np.clip(block_starts, 0, 1)
+        block_starts[0] = 1
+        return block_starts.astype(bool)
 
     @property
     def is_choice_high(self):
@@ -288,25 +376,21 @@ class Bandit2Arm(BanditTask):
 
     @staticmethod
     def from_csv(
-        fp, probs, choices, rewards, session_ids, starts=None, stops=None, datetime=None
+        fp,
+        probs,
+        choices,
+        rewards,
+        session_ids,
+        block_ids=None,
+        window_ids=None,
+        starts=None,
+        stops=None,
+        datetime=None,
     ):
-        """This function primarily written to handle data from anirudh's bandit task/processed data
+        """Build Bandit2Arm from a CSV file.
 
-        Parameters
-        ----------
-        fp : .csv file name
-            File path to the csv file that contains the data
-        probs : list of str
-            List of column names in the csv file that contain the probabilities for each arm.
-        choices : str
-            Column name in the csv file that contains the choices made by the subject.
-        rewards : str
-            Column name in the csv file that contains the rewards received for each choice.
-
-        Returns
-        -------
-        _type_
-            _description_
+        probs: list[str] column names for per-arm probabilities.
+        choices, rewards, session_ids, block_ids, window_ids, starts, stops, datetime: column names (str).
         """
         df = pd.read_csv(fp)
         return Bandit2Arm(
@@ -314,42 +398,38 @@ class Bandit2Arm(BanditTask):
             choices=df[choices].to_numpy(),
             rewards=df[rewards].to_numpy(),
             session_ids=df[session_ids].to_numpy(),
-            starts=df[starts].to_numpy() if starts is not None else None,
-            stops=df[stops].to_numpy() if stops is not None else None,
-            datetime=df[datetime].to_numpy() if datetime is not None else None,
+            block_ids=None if block_ids is None else df[block_ids].to_numpy(),
+            window_ids=None if window_ids is None else df[window_ids].to_numpy(),
+            starts=None if starts is None else df[starts].to_numpy(),
+            stops=None if stops is None else df[stops].to_numpy(),
+            datetime=None if datetime is None else df[datetime].to_numpy(),
             metadata=None,
         )
 
     @staticmethod
     def from_df(
-        df, probs, choices, rewards, session_ids, starts=None, stops=None, datetime=None
+        df,
+        probs,
+        choices,
+        rewards,
+        session_ids,
+        block_ids=None,
+        window_ids=None,
+        starts=None,
+        stops=None,
+        datetime=None,
     ):
-        """This function primarily written to handle data from anirudh's bandit task/processed data
-
-        Parameters
-        ----------
-        df : pandas DataFrame
-            DataFrame containing the bandit task data.
-        probs : list of str
-            List of column names in the csv file that contain the probabilities for each arm.
-        choices : str
-            Column name in the csv file that contains the choices made by the subject.
-        rewards : str
-            Column name in the csv file that contains the rewards received for each choice.
-
-        Returns
-        -------
-        _type_
-            _description_
-        """
+        """Build Bandit2Arm from an existing DataFrame."""
         return Bandit2Arm(
             probs=df.loc[:, probs].to_numpy(),
             choices=df[choices].to_numpy(),
             rewards=df[rewards].to_numpy(),
             session_ids=df[session_ids].to_numpy(),
-            starts=df[starts].to_numpy() if starts is not None else None,
-            stops=df[stops].to_numpy() if stops is not None else None,
-            datetime=df[datetime].to_numpy() if datetime is not None else None,
+            block_ids=None if block_ids is None else df[block_ids].to_numpy(),
+            window_ids=None if window_ids is None else df[window_ids].to_numpy(),
+            starts=None if starts is None else df[starts].to_numpy(),
+            stops=None if stops is None else df[stops].to_numpy(),
+            datetime=None if datetime is None else df[datetime].to_numpy(),
             metadata=None,
         )
 
