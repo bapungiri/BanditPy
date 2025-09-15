@@ -70,8 +70,8 @@ class Thompson2Arm:
         self.use_analytic = use_analytic
         self._master_rng = np.random.default_rng(seed)
 
-        self.a0: float | None = None
-        self.b0: float | None = None
+        self.alpha0: float | None = None
+        self.beta0: float | None = None
         self.lr_chosen: float | None = None
         self.lr_unchosen: float | None = None
         self.tau: float | None = None
@@ -170,14 +170,14 @@ class Thompson2Arm:
 
         self.alpha0, self.beta0, self.lr_chosen, self.lr_unchosen, self.tau = best_x
         self.nll = best_val
-        return dict(
-            alpha0=self.alpha0,
-            beta0=self.beta0,
-            lr_chosen=self.lr_chosen,
-            lr_unchosen=self.lr_unchosen,
-            tau=self.tau,
-            nll=self.nll,
-        )
+        # return dict(
+        #     alpha0=self.alpha0,
+        #     beta0=self.beta0,
+        #     lr_chosen=self.lr_chosen,
+        #     lr_unchosen=self.lr_unchosen,
+        #     tau=self.tau,
+        #     nll=self.nll,
+        # )
 
     # ---------- Diagnostics ----------
     def inspect_smoothness(self, repeats=20):

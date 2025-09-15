@@ -260,8 +260,8 @@ class BanditTask(DataManager):
         assert (
             self.datetime is not None
         ), "Datetime must be provided for window splitting."
-        dt = pd.to_datetime(self.datetime)
-        gap = np.diff(dt, prepend=dt[0]).total_seconds() / 60
+        dt = self.datetime.astype("datetime64[s]")
+        gap = np.diff(dt, prepend=dt[0]).astype("timedelta64[s]").astype(int) / 60
         window_starts_bool = gap > time_window_min
         window_starts_bool[0] = 1  # Ensure first trial is a window start
         window_ids = np.cumsum(window_starts_bool)
