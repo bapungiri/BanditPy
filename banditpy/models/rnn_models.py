@@ -867,3 +867,240 @@ class BanditTrainer2Arm:
             entropy -= p2 * np.log2(p2)
 
         return entropy
+
+
+class GRUCellEq2(nn.Module):
+    """
+    Custom GRU cell implementing the equations in the text (Eq. 2 style):
+      r_t = sigma(W^r_x x_t + b^r_x + W^r_h h_{t-1} + b^r_h)
+      z_t = sigma(W^z_x x_t + b^z_x + W^z_h h_{t-1} + b^z_h)
+      n_t = tanh(W^n_x x_t + b^n_x + r_t ∘ (W^n_h h_{t-1} + b^n_h))
+      h_t = (1 - z_t) ∘ n_t + z_t ∘ h_{t-1}
+    """
+
+    def __init__(self, input_size: int, hidden_size: int):
+        super().__init__()
+        H, D = hidden_size, input_size
+        # input-to-hidden
+        self.Wxr = nn.Linear(D, H, bias=True)  # bias == b^r_x
+        self.Wxz = nn.Linear(D, H, bias=True)  # bias == b^z_x
+        self.Wxn = nn.Linear(D, H, bias=True)  # bias == b^n_x
+        # hidden-to-hidden (no bias here; we add explicit b^·_h below)
+        self.Whr = nn.Linear(H, H, bias=False)
+        self.Whz = nn.Linear(H, H, bias=False)
+        self.Whn = nn.Linear(H, H, bias=False)
+        # hidden biases
+        self.brh = nn.Parameter(torch.zeros(H))  # b^r_h
+        self.bzh = nn.Parameter(torch.zeros(H))  # b^z_h
+        self.bnh = nn.Parameter(torch.zeros(H))  # b^n_h
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        for m in [self.Wxr, self.Wxz, self.Wxn, self.Whr, self.Whz, self.Whn]:
+            nn.init.xavier_uniform_(m.weight)
+            if getattr(m, "bias", None) is not None:
+                nn.init.constant_(m.bias, 0.0)
+        nn.init.constant_(self.brh, 0.0)
+        nn.init.constant_(self.bzh, 0.0)
+        nn.init.constant_(self.bnh, 0.0)
+
+    def forward(self, x_t: torch.Tensor, h_prev: torch.Tensor) -> torch.Tensor:
+        r_t = torch.sigmoid(self.Wxr(x_t) + self.Whr(h_prev) + self.brh)
+        z_t = torch.sigmoid(self.Wxz(x_t) + self.Whz(h_prev) + self.bzh)
+        n_t = torch.tanh(self.Wxn(x_t) + r_t * (self.Whn(h_prev) + self.bnh))
+        h_t = (1.0 - z_t) * n_t + z_t * h_prev
+        return h_t
+
+
+class SwitchGRUCell(nn.Module):
+    """
+    Switching-GRU (sGRU) cell for discrete inputs (as described in the text).
+    The effective parameters are a convex combination of K expert parameter sets
+    selected by a one-hot (or soft) selector u_t ∈ R^K computed from x_t.
+
+    For each gate g ∈ {r,z,n} we keep K expert weights:
+      W^g_x[k], W^g_h[k], b^g_x[k], b^g_h[k],  k = 1..K
+    Effective parameters at t are:
+      W^g_x(t) = Σ_k u_t[k] W^g_x[k]  (and similarly for others)
+    Then apply the GRU equations (Eq. 2) with those effective parameters.
+    """
+
+    def __init__(self, input_size: int, hidden_size: int, num_modes: int):
+        super().__init__()
+        self.K = num_modes
+        H, D, K = hidden_size, input_size, num_modes
+
+        # Expert banks
+        self.Wxr = nn.Parameter(torch.empty(K, H, D))
+        self.Wxz = nn.Parameter(torch.empty(K, H, D))
+        self.Wxn = nn.Parameter(torch.empty(K, H, D))
+
+        self.Whr = nn.Parameter(torch.empty(K, H, H))
+        self.Whz = nn.Parameter(torch.empty(K, H, H))
+        self.Whn = nn.Parameter(torch.empty(K, H, H))
+
+        self.bxr = nn.Parameter(torch.zeros(K, H))
+        self.bxz = nn.Parameter(torch.zeros(K, H))
+        self.bxn = nn.Parameter(torch.zeros(K, H))
+
+        self.brh = nn.Parameter(torch.zeros(K, H))
+        self.bzh = nn.Parameter(torch.zeros(K, H))
+        self.bnh = nn.Parameter(torch.zeros(K, H))
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        def xavier_bank(W):
+            for k in range(W.shape[0]):
+                nn.init.xavier_uniform_(W[k])
+
+        for bank in [self.Wxr, self.Wxz, self.Wxn, self.Whr, self.Whz, self.Whn]:
+            xavier_bank(bank)
+        for b in [self.bxr, self.bxz, self.bxn, self.brh, self.bzh, self.bnh]:
+            nn.init.constant_(b, 0.0)
+
+    def _mix(self, bank: torch.Tensor, u_t: torch.Tensor) -> torch.Tensor:
+        # bank: (K, H, D) or (K, H, H) or (K, H); u_t: (B, K)
+        # returns mixed params with leading batch dim
+        if bank.dim() == 3:
+            # (B, H, D/H)
+            return torch.einsum("khd,bk->bhd", bank, u_t)
+        elif bank.dim() == 2:
+            return torch.einsum("kh,bk->bh", bank, u_t)
+        else:
+            raise ValueError("Unexpected bank dim")
+
+    def forward(
+        self, x_t: torch.Tensor, h_prev: torch.Tensor, u_t: torch.Tensor
+    ) -> torch.Tensor:
+        # x_t: (B, D), h_prev: (B, H), u_t: (B, K)
+        Wxr = self._mix(self.Wxr, u_t)  # (B,H,D)
+        Wxz = self._mix(self.Wxz, u_t)
+        Wxn = self._mix(self.Wxn, u_t)
+
+        Whr = self._mix(self.Whr, u_t)  # (B,H,H)
+        Whz = self._mix(self.Whz, u_t)
+        Whn = self._mix(self.Whn, u_t)
+
+        bxr = self._mix(self.bxr, u_t)  # (B,H)
+        bxz = self._mix(self.bxz, u_t)
+        bxn = self._mix(self.bxn, u_t)
+
+        brh = self._mix(self.brh, u_t)  # (B,H)
+        bzh = self._mix(self.bzh, u_t)
+        bnh = self._mix(self.bnh, u_t)
+
+        # affine ops with batched weights
+        def aff_x(W, x, b):  # (B,H,D) @ (B,D) + (B,H)
+            return torch.einsum("bhd,bd->bh", W, x) + b
+
+        def aff_h(W, h, b):
+            return torch.einsum("bhh,bh->bh", W, h) + b
+
+        r_t = torch.sigmoid(aff_x(Wxr, x_t, bxr) + aff_h(Whr, h_prev, brh))
+        z_t = torch.sigmoid(aff_x(Wxz, x_t, bxz) + aff_h(Whz, h_prev, bzh))
+        n_t = torch.tanh(aff_x(Wxn, x_t, bxn) + r_t * (aff_h(Whn, h_prev, bnh)))
+        h_t = (1.0 - z_t) * n_t + z_t * h_prev
+        return h_t
+
+
+class BanditSwitchRNN(nn.Module):
+    """
+    RNN policy model with either:
+      - Vanilla GRU cell (GRUCellEq2), or
+      - Switching GRU cell (SwitchGRUCell) with K modes selected from inputs.
+
+    Output layer:
+      - Fully connected readout: s_t = Θ h_t + b  (recommended; default)
+      - Optional diagonal readout when hidden_size == num_actions:
+            s_i(t) = θ_i * h_i(t) + b_i
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int,
+        num_actions: int,
+        cell_type: str = "gru",  # "gru" or "sgru"
+        num_modes: int = 4,  # only used for sgru
+        diagonal_readout: bool = False,  # if True, requires hidden_size == num_actions
+    ):
+        super().__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.num_actions = num_actions
+        self.cell_type = cell_type.lower()
+        self.num_modes = num_modes
+        self.diagonal_readout = diagonal_readout and (hidden_size == num_actions)
+
+        if self.cell_type == "gru":
+            self.cell = GRUCellEq2(input_size, hidden_size)
+        elif self.cell_type == "sgru":
+            self.cell = SwitchGRUCell(input_size, hidden_size, num_modes=num_modes)
+        else:
+            raise ValueError("cell_type must be 'gru' or 'sgru'.")
+
+        if self.diagonal_readout:
+            # θ ∈ R^{A}, b ∈ R^{A}, applied element-wise to h (A must equal H)
+            self.theta = nn.Parameter(torch.zeros(num_actions))
+            self.bias = nn.Parameter(torch.zeros(num_actions))
+            nn.init.normal_(self.theta, mean=0.0, std=1.0 / math.sqrt(hidden_size))
+            nn.init.constant_(self.bias, 0.0)
+        else:
+            self.readout = nn.Linear(hidden_size, num_actions)
+            nn.init.normal_(
+                self.readout.weight, mean=0.0, std=1.0 / math.sqrt(hidden_size)
+            )
+            nn.init.constant_(self.readout.bias, 0.0)
+
+    @staticmethod
+    def default_selector(x_t: torch.Tensor, num_modes: int) -> torch.Tensor:
+        """
+        Build selector u_t from x_t for a 2-armed bandit with input [onehot(a_{t-1}), r_{t-1}],
+        i.e., x_t = [a1,a2,r], where a1+a2 ∈ {0,1}, r ∈ {0,1}.
+        Modes: 0:(a=1,r=0), 1:(a=2,r=0), 2:(a=1,r=1), 3:(a=2,r=1)  → K=4.
+        If num_modes != 4, returns a uniform (no-switch) selector.
+        """
+        B, D = x_t.shape
+        if num_modes != 4 or D < 3:
+            return torch.full((B, num_modes), 1.0 / num_modes, device=x_t.device)
+        a = torch.argmax(x_t[:, :2], dim=-1)  # 0 or 1
+        r = (x_t[:, 2] > 0.5).long()  # 0 or 1
+        idx = a + 2 * r  # 0..3
+        u = F.one_hot(idx, num_classes=4).float()
+        return u
+
+    def forward(
+        self, x: torch.Tensor, h0: torch.Tensor | None = None, selector_fn=None
+    ):
+        """
+        x: (B, T, D)
+        Returns:
+          logits: (B, T, A)
+          h: final hidden (B, H)
+        """
+        B, T, D = x.shape
+        H, A = self.hidden_size, self.num_actions
+        h = torch.zeros(B, H, device=x.device) if h0 is None else h0
+
+        logits_list = []
+        for t in range(T):
+            x_t = x[:, t, :]
+            if self.cell_type == "sgru":
+                if selector_fn is None:
+                    u_t = self.default_selector(x_t, self.num_modes)
+                else:
+                    u_t = selector_fn(x_t)  # expects (B,K)
+                h = self.cell(x_t, h, u_t)
+            else:
+                h = self.cell(x_t, h)
+
+            if self.diagonal_readout:
+                # element-wise mapping then identity to actions (requires A==H)
+                s_t = self.theta * h + self.bias
+            else:
+                s_t = self.readout(h)
+            logits_list.append(s_t.unsqueeze(1))
+
+        logits = torch.cat(logits_list, dim=1)
+        return logits, h
