@@ -6,6 +6,7 @@ from ..core import Bandit2Arm
 
 def csv2ArmIO(folder: Path, code=200) -> Bandit2Arm:
     # Concatenate all .csv files
+    print(sorted(folder.glob("*.csv")))
     dfs = [pd.read_csv(fp, sep=",") for fp in sorted(folder.glob("*.csv"))]
     data = pd.concat(dfs, ignore_index=True)
     data = data[(data["eventCode"] == code) & (data["chosenPort"].isin([1, 2]))]
