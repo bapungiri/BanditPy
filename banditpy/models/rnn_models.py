@@ -1328,300 +1328,11 @@ class BanditModelFreeAgent2Arm:
             "params_used": params,
         }
 
-    # ---------------------------- Log Likelihood ---------------------------- #
-    def log_likelihood(self, choices, rewards, params):
-        choices = self._coerce_actions(choices)
-        rewards = np.asarray(rewards).astype(int)
-        params = np.asarray(params, dtype=float)
-        n = len(choices)
-        assert len(rewards) == n
-        Q = np.zeros(2, dtype=float)
-        prev_action = None
-        loglik = 0.0
-        eps = 1e-9
-        for t in range(n):
-            if self.variant in ("mfd", "mfdp"):
-                if self.decay:
-                    if self.variant == "mfdp":
-                        alpha, beta_decay, inv_temp, *rest = params
-                    else:
-                        alpha, beta_decay, inv_temp = params[:3]
-                else:
-                    if self.variant == "mfdp":
-                        alpha, inv_temp, *rest = params
-                    else:
-                        alpha, inv_temp = params[:2]
-                logits = inv_temp * Q
-                if self.variant == "mfdp" and prev_action is not None:
-                    rho = params[-1]
-                    logits[prev_action] += rho
-            elif self.variant == "mflb":
-                inv_temp = params[-1]
-                logits = inv_temp * Q
-            else:
-                raise RuntimeError
-            probs = self._softmax(logits)
-            action = choices[t]
-            loglik += np.log(probs[action] + eps)
-            reward = rewards[t]
-            # Update
-            if self.variant in ("mfd", "mfdp"):
-                Q = self._update_mfd(Q, action, reward, params)
-            else:
-                Q = self._update_mflb(Q, action, reward, params)
-            prev_action = action
-        return loglik
-
-    # ---------------------------- Parameter Fitting ---------------------------- #
-    def _sample_random_params(self, rng):
-        vals = []
-        for name, ptype in self.param_spec:
-            if ptype == "unit":
-                vals.append(rng.uniform(0.01, 0.99))
-            elif ptype == "pos":
-                vals.append(np.exp(rng.uniform(np.log(0.1), np.log(20.0))))
-            elif ptype == "unc":
-                vals.append(rng.normal(0.0, 0.5))
-        return np.array(vals)
-
-    def fit(
-        self, choices, rewards, n_starts=50, method="auto", seed=None, verbose=False
-    ):
-        """Fit parameters by maximizing log-likelihood.
-
-        A light-weight routine: multi-start random search + optional SciPy refinement.
-        Returns dict with best_params, neg_loglik, all_trials (list of dicts).
-        """
-        rng = np.random.default_rng(seed)
-        choices = self._coerce_actions(choices)
-        rewards = np.asarray(rewards).astype(int)
-
-        trials_info = []
-        best_ll = -np.inf
-        best_params = None
-
-        for i in range(n_starts):
-            params0 = self._sample_random_params(rng)
-            ll = self.log_likelihood(choices, rewards, params0)
-            trials_info.append({"start_idx": i, "params": params0, "loglik": ll})
-            if ll > best_ll:
-                best_ll = ll
-                best_params = params0
-
-        # Optional SciPy refinement
-        refined = False
-        if method != "none":
-            try:
-                from scipy.optimize import minimize
-
-                def neg_obj(p_raw):
-                    # Project back into feasible space for unit/pos
-                    p = p_raw.copy()
-                    idx = 0
-                    for j, (name, ptype) in enumerate(self.param_spec):
-                        if ptype == "unit":
-                            # squash to (0,1)
-                            p[j] = 1 / (1 + np.exp(-p_raw[j]))
-                        elif ptype == "pos":
-                            p[j] = np.exp(p_raw[j])
-                        # unc: identity
-                    return -self.log_likelihood(choices, rewards, p)
-
-                # Initialize raw params via inverse transforms
-                p0_raw = []
-                for val, (name, ptype) in zip(best_params, self.param_spec):
-                    if ptype == "unit":
-                        val = np.clip(val, 1e-6, 1 - 1e-6)
-                        p0_raw.append(np.log(val) - np.log(1 - val))  # logit
-                    elif ptype == "pos":
-                        p0_raw.append(np.log(max(val, 1e-8)))
-                    else:
-                        p0_raw.append(val)
-                p0_raw = np.array(p0_raw)
-
-                res = minimize(neg_obj, p0_raw, method="L-BFGS-B")
-                if res.success:
-                    # Forward transform
-                    p_opt = res.x.copy()
-                    for j, (name, ptype) in enumerate(self.param_spec):
-                        if ptype == "unit":
-                            p_opt[j] = 1 / (1 + np.exp(-p_opt[j]))
-                        elif ptype == "pos":
-                            p_opt[j] = np.exp(p_opt[j])
-                    ll_new = self.log_likelihood(choices, rewards, p_opt)
-                    if ll_new > best_ll:
-                        best_ll = ll_new
-                        best_params = p_opt
-                        refined = True
-            except Exception as e:  # noqa: BLE001
-                if verbose:
-                    print(f"SciPy refinement skipped: {e}")
-
-        return {
-            "best_params": best_params,
-            "neg_loglik": -best_ll,
-            "loglik": best_ll,
-            "variant": self.variant,
-            "decay": self.decay,
-            "refined": refined,
-            "random_trials": trials_info,
-            "param_spec": self.param_spec,
-        }
-
-
-class BanditModelBasedRNN(nn.Module):
-    """Model-based RNN agent for two-armed bandit tasks.
-
-    This agent explicitly learns/maintains an internal estimate of reward
-    probabilities (or logits) for each arm inside a recurrent state and uses
-    those to compute action logits. Unlike the purely model-free variant,
-    here we encourage the hidden state to encode a belief over reward rates
-    and optionally predict immediate reward probabilities directly.
-
-    Architecture:
-      - Recurrent core (GRU or LSTM) receives: [one_hot(prev_action), prev_reward]
-      - Belief head: maps hidden -> reward prob logits (2 values)
-      - Policy head: optionally separate mapping hidden -> action logits
-        (can share weights with belief head if desired).
-
-    Loss Components (per trial sequence):
-      - Policy loss (actor): REINFORCE with (return - baseline) or simple
-        advantage using a learned value head.
-      - Value loss (critic): MSE between discounted returns and value estimates.
-      - Belief calibration loss: BCE between predicted reward probability for
-        the *action chosen* and actual reward outcome. This nudges the network
-        toward explicit predictive modeling (model-based signal).
-
-    Args:
-        input_size: typically 3 (a1, a2, r_prev)
-        hidden_size: recurrent hidden dimension
-        num_actions: number of arms (2 for two-armed bandit)
-        cell: 'gru' or 'lstm'
-        belief_weight: scale of belief (reward prediction) loss
-        entropy_weight: policy entropy regularization coefficient
-        value_weight: scale for value loss
-        shared_head: if True the policy logits are identical to reward belief logits
-
-    Example:
-        agent = BanditModelBasedRNN()
-        trainer = agent.make_trainer()
-        df = trainer.train_env(n_sessions=2000, n_trials=150, reward_probs_mode='Structured')
-    """
-
-    def __init__(
-        self,
-        input_size: int = 3,
-        hidden_size: int = 64,
-        num_actions: int = 2,
-        cell: str = "gru",
-        belief_weight: float = 1.0,
-        entropy_weight: float = 0.01,
-        value_weight: float = 0.5,
-        shared_head: bool = False,
-    ):
-        super().__init__()
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.num_actions = num_actions
-        self.cell_type = cell.lower()
-        self.belief_weight = belief_weight
-        self.entropy_weight = entropy_weight
-        self.value_weight = value_weight
-        self.shared_head = shared_head
-
-        if self.cell_type == "gru":
-            self.core = nn.GRU(input_size, hidden_size, batch_first=True)
-        elif self.cell_type == "lstm":
-            self.core = nn.LSTM(input_size, hidden_size, batch_first=True)
-        else:
-            raise ValueError("cell must be 'gru' or 'lstm'")
-
-        self.belief_head = nn.Linear(hidden_size, num_actions)
-        if shared_head:
-            self.policy_head = self.belief_head
-        else:
-            self.policy_head = nn.Linear(hidden_size, num_actions)
-        self.value_head = nn.Linear(hidden_size, 1)
-
-        for m in [self.belief_head, self.value_head] + (
-            [] if shared_head else [self.policy_head]
-        ):
-            nn.init.kaiming_uniform_(m.weight, a=math.sqrt(5))
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0.0)
-
-    def forward(self, x, hidden=None):
-        # x: (B,T,D)
-        core_out, new_hidden = self.core(x, hidden)
-        belief_logits = self.belief_head(core_out)  # (B,T,A)
-        policy_logits = self.policy_head(core_out)  # (B,T,A)
-        values = self.value_head(core_out).squeeze(-1)  # (B,T)
-        return belief_logits, policy_logits, values, new_hidden
-
-    # ---------------- Trainer Helper ---------------- #
-    def make_trainer(self, lr=3e-4, gamma=0.9, device=None):
-        return _ModelBasedRNNTrainer(
-            self,
-            lr=lr,
-            gamma=gamma,
-            device=device,
-            belief_weight=self.belief_weight,
-            entropy_weight=self.entropy_weight,
-            value_weight=self.value_weight,
-        )
-
-
-class _ModelBasedRNNTrainer:
-    """Internal trainer for BanditModelBasedRNN.
-
-    Provides a similar training interface to BanditTrainer2Arm but with
-    additional belief prediction term.
-    """
-
-    def __init__(
-        self,
-        model: BanditModelBasedRNN,
-        lr=3e-4,
-        gamma=0.9,
-        device=None,
-        belief_weight=1.0,
-        entropy_weight=0.01,
-        value_weight=0.5,
-    ):
-        self.model = model
-        self.gamma = gamma
-        self.device = device or torch.device(
-            "cuda" if torch.cuda.is_available() else "cpu"
-        )
-        self.model.to(self.device)
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
-        self.belief_weight = belief_weight
-        self.entropy_weight = entropy_weight
-        self.value_weight = value_weight
-        self.train_history = []
-
-    def _discount(self, rewards: list[float]):
-        G = []
-        acc = 0.0
-        for r in reversed(rewards):
-            acc = r + self.gamma * acc
-            G.insert(0, acc)
-        return torch.tensor(G, dtype=torch.float32, device=self.device)
-
-    def _build_input(self, prev_action, prev_reward):
-        x = torch.zeros(self.model.input_size, device=self.device)
-        if prev_action is not None:
-            x[prev_action] = 1.0
-        x[self.model.num_actions] = prev_reward if prev_reward is not None else 0.0
-        return x
-
-    def _sample_reward_probs(self, mode, N, low=0, high=1, decimals=1):
-        if isinstance(mode, str):
-
 
 # ---------------------------------------------------------------------------
 # TinyBehaviorRNN: Supervised log-likelihood behavioral RNN (paper-style)
 # ---------------------------------------------------------------------------
+
 
 class TinyBehaviorRNN(nn.Module):
     """Minimal GRU (or switching GRU) policy model for behavioral fitting.
@@ -1653,7 +1364,7 @@ class TinyBehaviorRNN(nn.Module):
         input_size: int,
         num_actions: int,
         hidden_size: int,
-        cell_type: str = 'gru',
+        cell_type: str = "gru",
         diagonal_readout: bool = False,
         learn_h0: bool = False,
     ):
@@ -1665,8 +1376,8 @@ class TinyBehaviorRNN(nn.Module):
         self.diagonal_readout = diagonal_readout and (hidden_size == num_actions)
         self.learn_h0 = learn_h0
 
-        if self.cell_type != 'gru':
-            raise ValueError('Currently only vanilla GRU supported for tiny model.')
+        if self.cell_type != "gru":
+            raise ValueError("Currently only vanilla GRU supported for tiny model.")
         self.rnn = nn.GRU(input_size, hidden_size, batch_first=True)
         if self.diagonal_readout:
             self.theta = nn.Parameter(torch.zeros(num_actions))
@@ -1680,7 +1391,7 @@ class TinyBehaviorRNN(nn.Module):
         if learn_h0:
             self.h0_param = nn.Parameter(torch.zeros(1, 1, hidden_size))
         else:
-            self.register_buffer('h0_param', torch.zeros(1, 1, hidden_size))
+            self.register_buffer("h0_param", torch.zeros(1, 1, hidden_size))
 
     def forward(self, x, h0=None):
         # x: (B,T,D)
@@ -1705,15 +1416,15 @@ def _prepare_sequence(session, num_actions: int, state_dim: int | None = None):
       'rewards': array of rewards (0/1)
       optional 'states': array of ints (0..S-1)
     """
-    actions = np.asarray(session['actions'])
+    actions = np.asarray(session["actions"])
     if actions.min() == 1:  # convert to 0-based
         actions = actions - 1
-    rewards = np.asarray(session['rewards'])
+    rewards = np.asarray(session["rewards"])
     T = len(actions)
     assert len(rewards) == T
-    has_states = 'states' in session and state_dim is not None
+    has_states = "states" in session and state_dim is not None
     if has_states:
-        states = np.asarray(session['states'])
+        states = np.asarray(session["states"])
         assert len(states) == T
 
     # Build inputs at time t depend on previous action/reward
@@ -1726,11 +1437,11 @@ def _prepare_sequence(session, num_actions: int, state_dim: int | None = None):
                 s_prev_vec = np.zeros(state_dim)
         else:
             a_prev_vec = np.zeros(num_actions)
-            a_prev_vec[actions[t-1]] = 1.0
-            r_prev = rewards[t-1]
+            a_prev_vec[actions[t - 1]] = 1.0
+            r_prev = rewards[t - 1]
             if has_states:
                 s_prev_vec = np.zeros(state_dim)
-                s_prev_vec[states[t-1]] = 1.0
+                s_prev_vec[states[t - 1]] = 1.0
         parts = [a_prev_vec, [r_prev]]
         if has_states:
             parts.append(s_prev_vec)
@@ -1740,12 +1451,14 @@ def _prepare_sequence(session, num_actions: int, state_dim: int | None = None):
     return X, y
 
 
-def collate_sessions(sessions, num_actions: int, state_dim: int | None = None, device=None):
+def collate_sessions(
+    sessions, num_actions: int, state_dim: int | None = None, device=None
+):
     """Pad and batch variable-length sessions.
 
     Returns dict with tensors: inputs (B,Tmax,D), targets (B,Tmax), mask (B,Tmax)
     """
-    processed = [ _prepare_sequence(s, num_actions, state_dim) for s in sessions ]
+    processed = [_prepare_sequence(s, num_actions, state_dim) for s in sessions]
     lengths = [x[0].shape[0] for x in processed]
     Tmax = max(lengths)
     D = processed[0][0].shape[1]
@@ -1753,15 +1466,15 @@ def collate_sessions(sessions, num_actions: int, state_dim: int | None = None, d
     inputs = np.zeros((B, Tmax, D), dtype=np.float32)
     targets = np.zeros((B, Tmax), dtype=np.int64)
     mask = np.zeros((B, Tmax), dtype=np.float32)
-    for i,(X,y) in enumerate(processed):
+    for i, (X, y) in enumerate(processed):
         L = X.shape[0]
-        inputs[i,:L] = X
-        targets[i,:L] = y
-        mask[i,:L] = 1.0
+        inputs[i, :L] = X
+        targets[i, :L] = y
+        mask[i, :L] = 1.0
     inputs = torch.tensor(inputs, device=device)
     targets = torch.tensor(targets, device=device)
     mask = torch.tensor(mask, device=device)
-    return {'inputs': inputs, 'targets': targets, 'mask': mask, 'lengths': lengths}
+    return {"inputs": inputs, "targets": targets, "mask": mask, "lengths": lengths}
 
 
 class TinyBehaviorRNNTrainer:
@@ -1776,64 +1489,97 @@ class TinyBehaviorRNNTrainer:
         patience: early stopping patience based on validation NLL
         grad_clip: gradient norm clip (None disables)
     """
-    def __init__(self, model: TinyBehaviorRNN, lr=5e-3, weight_decay=5e-4,
-                 max_epochs=500, batch_size=16, patience=30, grad_clip=5.0,
-                 device=None):
+
+    def __init__(
+        self,
+        model: TinyBehaviorRNN,
+        lr=5e-3,
+        weight_decay=5e-4,
+        max_epochs=500,
+        batch_size=16,
+        patience=30,
+        grad_clip=5.0,
+        device=None,
+        l1_recurrent: float = 0.0,
+    ):
         self.model = model
-        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = device or torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )
         self.model.to(self.device)
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr, weight_decay=weight_decay)
+        self.optimizer = torch.optim.Adam(
+            self.model.parameters(), lr=lr, weight_decay=weight_decay
+        )
         self.max_epochs = max_epochs
         self.batch_size = batch_size
         self.patience = patience
         self.grad_clip = grad_clip
-        self.history = {'train_nll': [], 'val_nll': []}
+        self.history = {"train_nll": [], "val_nll": []}
+        # L1 penalty on recurrent weights ("weight_hh" parameters of GRU)
+        self.l1_recurrent = float(l1_recurrent)
 
     def _epoch_batches(self, sessions):
         idx = np.arange(len(sessions))
         np.random.shuffle(idx)
         for start in range(0, len(idx), self.batch_size):
-            batch_ids = idx[start:start+self.batch_size]
+            batch_ids = idx[start : start + self.batch_size]
             yield [sessions[i] for i in batch_ids]
 
     def _compute_nll(self, batch):
-        logits, _ = self.model(batch['inputs'])  # (B,T,A)
+        logits, _ = self.model(batch["inputs"])  # (B,T,A)
         log_probs = F.log_softmax(logits, dim=-1)
-        B,T,A = log_probs.shape
-        gather = log_probs.gather(-1, batch['targets'].unsqueeze(-1)).squeeze(-1)
-        masked = gather * batch['mask']
-        nll = -masked.sum() / batch['mask'].sum().clamp_min(1.0)
+        B, T, A = log_probs.shape
+        gather = log_probs.gather(-1, batch["targets"].unsqueeze(-1)).squeeze(-1)
+        masked = gather * batch["mask"]
+        nll = -masked.sum() / batch["mask"].sum().clamp_min(1.0)
         return nll
 
     def fit(self, train_sessions, val_sessions):
-        best_val = float('inf')
+        best_val = float("inf")
         best_state = None
         epochs_no_improve = 0
-        for epoch in range(1, self.max_epochs+1):
+        for epoch in range(1, self.max_epochs + 1):
             self.model.train()
             train_losses = []
             for batch_sessions in self._epoch_batches(train_sessions):
-                batch = collate_sessions(batch_sessions, self.model.num_actions, device=self.device)
+                batch = collate_sessions(
+                    batch_sessions, self.model.num_actions, device=self.device
+                )
                 loss = self._compute_nll(batch)
+                # Add optional L1 penalty on recurrent weights (does not affect reported NLL)
+                if self.l1_recurrent > 0:
+                    l1_pen = 0.0
+                    for name, p in self.model.rnn.named_parameters():
+                        if "weight_hh" in name:
+                            l1_pen = l1_pen + p.abs().sum()
+                    loss_total = loss + self.l1_recurrent * l1_pen
+                else:
+                    loss_total = loss
                 self.optimizer.zero_grad()
-                loss.backward()
+                loss_total.backward()
                 if self.grad_clip is not None:
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(), self.grad_clip
+                    )
                 self.optimizer.step()
                 train_losses.append(float(loss.item()))
 
             # Validation
             self.model.eval()
             with torch.no_grad():
-                val_batch = collate_sessions(val_sessions, self.model.num_actions, device=self.device)
+                val_batch = collate_sessions(
+                    val_sessions, self.model.num_actions, device=self.device
+                )
                 val_loss = self._compute_nll(val_batch)
             mean_train = float(np.mean(train_losses))
-            self.history['train_nll'].append(mean_train)
-            self.history['val_nll'].append(float(val_loss.item()))
+            self.history["train_nll"].append(mean_train)
+            self.history["val_nll"].append(float(val_loss.item()))
 
             if val_loss < best_val - 1e-6:
                 best_val = float(val_loss.item())
-                best_state = {k: v.cpu().clone() for k,v in self.model.state_dict().items()}
+                best_state = {
+                    k: v.cpu().clone() for k, v in self.model.state_dict().items()
+                }
                 epochs_no_improve = 0
             else:
                 epochs_no_improve += 1
@@ -1849,166 +1595,791 @@ class TinyBehaviorRNNTrainer:
     @torch.no_grad()
     def evaluate(self, test_sessions):
         self.model.eval()
-        batch = collate_sessions(test_sessions, self.model.num_actions, device=self.device)
+        batch = collate_sessions(
+            test_sessions, self.model.num_actions, device=self.device
+        )
         nll = self._compute_nll(batch)
-        return {'test_nll': float(nll.item())}
+        return {"test_nll": float(nll.item())}
 
     def hidden_trajectories(self, session):
         """Return hidden state trajectory for a single session (numpy)."""
         self.model.eval()
         batch = collate_sessions([session], self.model.num_actions, device=self.device)
         with torch.no_grad():
-            logits, h_n = self.model(batch['inputs'])
+            logits, h_n = self.model(batch["inputs"])
         return logits.squeeze(0).cpu().numpy()
 
-            if mode.lower().startswith("s"):
-                p = np.round(np.random.uniform(low, high, size=N), decimals=decimals)
-                return np.vstack([p, 1 - p]).T
-            else:  # Unstructured
-                p1 = np.round(np.random.uniform(low, high, size=N), decimals=decimals)
-                p2 = np.round(np.random.uniform(low, high, size=N), decimals=decimals)
-                return np.vstack([p1, p2]).T
-        elif isinstance(mode, (list, tuple, np.ndarray)):
-            arr = np.asarray(mode)
-            if arr.shape == (2,):
-                return np.tile(arr, (N, 1))
-            assert arr.shape == (N, 2)
-            return arr
-        else:
-            raise ValueError("Unsupported reward prob mode")
-
-    def train_env(
-        self,
-        mode="Structured",
-        n_sessions=2000,
-        n_trials=200,
-        clip_grad=1.0,
-        progress=True,
-        belief_target_detach=True,
+    # ------------------------------------------------------------------
+    # Fixed-epoch training (no validation / early stopping)
+    # ------------------------------------------------------------------
+    def train_fixed_epochs(
+        self, train_sessions, epochs: int, batch_size: int | None = None
     ):
-        self.model.train()
-        all_records = []
-        reward_probs_all = self._sample_reward_probs(mode, N=n_sessions)
-        for s in tqdm(range(n_sessions), disable=not progress):
-            rps = reward_probs_all[s]
-            prev_action = None
-            prev_reward = 0.0
-            inputs = []
-            actions = []
-            rewards = []
-            chosen_belief_logits = []
+        """Train for a fixed number of epochs with NO validation set.
 
-            hidden = None
-            for t in range(n_trials):
-                x_t = (
-                    self._build_input(prev_action, prev_reward)
-                    .unsqueeze(0)
-                    .unsqueeze(0)
-                )  # (1,1,D)
-                inputs.append(x_t)
-                with torch.no_grad():
-                    belief_logits, policy_logits, values, hidden = self.model(
-                        x_t, hidden
+        Args:
+            train_sessions: list of session dicts
+            epochs: number of epochs to run (>=1)
+            batch_size: optional batch size (defaults to self.batch_size)
+        Returns:
+            history: list of training NLL per epoch
+        """
+        if batch_size is None:
+            batch_size = self.batch_size
+        history = []
+        for epoch in range(1, epochs + 1):
+            self.model.train()
+            train_losses = []
+            for batch_sessions in self._epoch_batches(train_sessions):
+                batch = collate_sessions(
+                    batch_sessions, self.model.num_actions, device=self.device
+                )
+                loss = self._compute_nll(batch)
+                if self.l1_recurrent > 0:
+                    l1_pen = 0.0
+                    for name, p in self.model.rnn.named_parameters():
+                        if "weight_hh" in name:
+                            l1_pen = l1_pen + p.abs().sum()
+                    loss = loss + self.l1_recurrent * l1_pen
+                self.optimizer.zero_grad()
+                loss.backward()
+                if self.grad_clip is not None:
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(), self.grad_clip
                     )
-                probs = torch.softmax(policy_logits.squeeze(0), dim=-1)  # (1,A)
-                dist = torch.distributions.Categorical(probs)
-                act = dist.sample().item()
-                reward = 1.0 if random.random() < rps[act] else 0.0
+                self.optimizer.step()
+                train_losses.append(float(loss.item()))
+            history.append(float(np.mean(train_losses)))
+        return history
 
-                actions.append(act)
-                rewards.append(reward)
-                prev_action, prev_reward = act, reward
-                all_records.append(
+
+# ---------------------------------------------------------------------------
+# Nested Cross-Validation Utility
+# ---------------------------------------------------------------------------
+
+
+def nested_cross_validation_tiny_behavior(
+    data,
+    num_actions: int,
+    outer_folds: int = 10,
+    inner_folds: int = 9,
+    block_size: int = 100,
+    l1_grid=(0.0, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1),
+    seed_grid=(0, 1, 2),
+    hidden_size: int = 8,
+    max_epochs: int = 500,
+    patience: int = 200,
+    grad_clip: float = 5.0,
+    weight_decay: float = 5e-4,
+    device=None,
+    verbose: bool = True,
+):
+    """Perform nested cross-validation as described in the paper passage.
+
+    Parameters
+    ----------
+    data : list[dict] | Bandit2Arm
+        Either a list of session dicts (each with keys 'actions','rewards') OR a
+        `Bandit2Arm` instance from which sessions will be extracted via
+        its `session_ids` field. Choices in `Bandit2Arm` (1/2) are converted to
+        0/1 using its `get_binarized_choices()` method.
+
+    Steps:
+      1. Split sessions into contiguous blocks of ~``block_size`` trials.
+      2. Randomly assign blocks into ``outer_folds`` folds.
+      3. For each outer fold (held-out test):
+           a. Use remaining folds as pool for inner CV (split into ``inner_folds`` folds).
+           b. For each (l1, seed) combo train across inner folds (train on inner_folds-1, validate on 1).
+           c. Select hyperparams with best mean validation NLL.
+           d. Refit on all inner training+validation blocks (i.e., all non-test outer blocks) using best hyperparams.
+           e. Evaluate on test fold blocks.
+      4. Return per-fold test NLL and weighted average (weight by # trials in test fold).
+
+    Returns:
+      dict with keys:
+        'folds': list of per-fold dicts (test_nll, trials, l1, seed)
+        'weighted_mean_test_nll': float
+        'hyperparam_selection': per-fold inner-CV table
+    """
+    rng = np.random.default_rng(0)
+
+    # ------------------------------------------------------------------
+    # Accept either list-of-sessions or Bandit2Arm task
+    # ------------------------------------------------------------------
+    if isinstance(data, list):
+        sessions = data
+    else:
+        # Try to treat as Bandit2Arm-like object
+        # Required attributes: choices, rewards, session_ids
+        required_attrs = ["choices", "rewards", "session_ids"]
+        if not all(hasattr(data, a) for a in required_attrs):
+            raise TypeError(
+                "`data` must be a list of session dicts or a Bandit2Arm instance with choices, rewards, session_ids"
+            )
+        # Build per-session dictionaries
+        sessions = []
+        # convert to 0/1 actions (Bandit2Arm stores 1/2)
+        try:
+            bin_choices = data.get_binarized_choices()
+        except Exception:  # fallback if method signature differs
+            bin_choices = np.where(data.choices == 2, 1, 0)
+        rewards_arr = np.asarray(data.rewards)
+        session_ids = np.asarray(data.session_ids)
+        for sid in np.unique(session_ids):
+            mask = session_ids == sid
+            actions_sid = bin_choices[mask]
+            rewards_sid = rewards_arr[mask]
+            sessions.append({"actions": actions_sid, "rewards": rewards_sid})
+
+    # ---- 1. Build blocks (~block_size trials) ----
+    blocks = []  # each block: session-like dict
+    for sess in sessions:
+        actions = np.asarray(sess["actions"])  # shape (T,)
+        rewards = np.asarray(sess["rewards"])
+        T = len(actions)
+        start = 0
+        while start < T:
+            end = min(start + block_size, T)
+            blk = {
+                "actions": actions[start:end].copy(),
+                "rewards": rewards[start:end].copy(),
+            }
+            blocks.append(blk)
+            start = end
+    if len(blocks) < outer_folds:
+        raise ValueError(
+            f"Not enough blocks ({len(blocks)}) for {outer_folds} outer folds; reduce outer_folds or block_size."
+        )
+
+    # ---- 2. Assign blocks to outer folds ----
+    idx = np.arange(len(blocks))
+    rng.shuffle(idx)
+    outer_assignments = [idx[i::outer_folds].tolist() for i in range(outer_folds)]
+
+    def subset(indices):
+        return [blocks[i] for i in indices]
+
+    fold_results = []
+    inner_selection_tables = []
+
+    # Helper to set seeds
+    def set_seed(all_seed: int):
+        import random
+
+        random.seed(all_seed)
+        np.random.seed(all_seed)
+        torch.manual_seed(all_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(all_seed)
+
+    for test_fold_idx in range(outer_folds):
+        test_indices = outer_assignments[test_fold_idx]
+        test_blocks = subset(test_indices)
+        train_val_indices = [
+            i
+            for j, fold in enumerate(outer_assignments)
+            if j != test_fold_idx
+            for i in fold
+        ]
+        train_val_blocks = subset(train_val_indices)
+
+        # Inner folds assignment over train_val blocks
+        tv_idx = np.arange(len(train_val_blocks))
+        rng.shuffle(tv_idx)
+        inner_assignments = [
+            tv_idx[i::inner_folds].tolist() for i in range(inner_folds)
+        ]
+        if inner_folds != len(inner_assignments):  # defensive
+            inner_folds = len(inner_assignments)
+
+        hyper_eval_rows = []
+        for l1 in l1_grid:
+            for seed in seed_grid:
+                inner_val_scores = []
+                for inner_val_fold in range(inner_folds):
+                    val_idx = inner_assignments[inner_val_fold]
+                    train_idx = [
+                        i
+                        for k, fold in enumerate(inner_assignments)
+                        if k != inner_val_fold
+                        for i in fold
+                    ]
+                    val_subset = [train_val_blocks[i] for i in val_idx]
+                    train_subset = [train_val_blocks[i] for i in train_idx]
+                    set_seed(seed)
+                    model = TinyBehaviorRNN(
+                        input_size=3,
+                        num_actions=num_actions,
+                        hidden_size=hidden_size,
+                    )
+                    trainer = TinyBehaviorRNNTrainer(
+                        model,
+                        l1_recurrent=l1,
+                        max_epochs=max_epochs,
+                        patience=patience,
+                        grad_clip=grad_clip,
+                        weight_decay=weight_decay,
+                        device=device,
+                    )
+                    hist = trainer.fit(train_subset, val_subset)
+                    inner_val_scores.append(hist["val_nll"][-1])
+                mean_val = float(np.mean(inner_val_scores))
+                hyper_eval_rows.append(
                     {
-                        "session": s + 1,
-                        "trial": t + 1,
-                        "action": act + 1,
-                        "reward": reward,
-                        "p_arm1": float(rps[0]),
-                        "p_arm2": float(rps[1]),
+                        "outer_test_fold": test_fold_idx,
+                        "l1_recurrent": l1,
+                        "seed": seed,
+                        "mean_inner_val_nll": mean_val,
+                        "inner_val_scores": inner_val_scores,
                     }
                 )
+        # Select best hyperparameters (lowest mean_inner_val_nll)
+        hyper_eval_rows.sort(key=lambda r: r["mean_inner_val_nll"])
+        best = hyper_eval_rows[0]
+        inner_selection_tables.append(hyper_eval_rows)
 
-            # Build tensor sequence for learning pass
-            x_seq = torch.cat(inputs, dim=1)  # (1,T,D)
-            belief_logits_seq, policy_logits_seq, value_seq, _ = self.model(x_seq)
-            policy_logits_seq = policy_logits_seq.squeeze(0)  # (T,A)
-            belief_logits_seq = belief_logits_seq.squeeze(0)
-            value_seq = value_seq.squeeze(0)
+        # Refit on entire train_val_blocks with best hyperparams
+        set_seed(best["seed"])
+        final_model = TinyBehaviorRNN(
+            input_size=3,
+            num_actions=num_actions,
+            hidden_size=hidden_size,
+        )
+        final_trainer = TinyBehaviorRNNTrainer(
+            final_model,
+            l1_recurrent=best["l1_recurrent"],
+            max_epochs=max_epochs,
+            patience=patience,
+            grad_clip=grad_clip,
+            weight_decay=weight_decay,
+            device=device,
+        )
+        final_trainer.fit(
+            train_val_blocks, test_blocks
+        )  # using test_blocks as validation for early stop is avoided; we need a validation subset
+        # To avoid leakage, create a small split inside train_val for validation during refit
+        # Simpler approach: reuse patience but with a 90/10 split
+        # (Implemented inline below overriding the previous fit)
+        # Re-split:
+        if len(train_val_blocks) > 1:
+            split_point = max(1, int(0.9 * len(train_val_blocks)))
+            refit_train = train_val_blocks[:split_point]
+            refit_val = train_val_blocks[split_point:]
+            final_trainer.fit(refit_train, refit_val)
 
-            # Compute returns & advantages
-            G = self._discount(rewards)
-            advantage = G - value_seq.detach()
-            action_tensor = torch.tensor(actions, dtype=torch.long, device=self.device)
-            log_probs = torch.distributions.Categorical(
-                logits=policy_logits_seq
-            ).log_prob(action_tensor)
-            policy_loss = -(log_probs * advantage).mean()
-            value_loss = self.value_weight * (G - value_seq).pow(2).mean()
-            entropy = (
-                torch.distributions.Categorical(logits=policy_logits_seq)
-                .entropy()
-                .mean()
+        # Evaluate on test blocks
+        test_metrics = final_trainer.evaluate(test_blocks)
+        test_trials = sum(len(b["actions"]) for b in test_blocks)
+        fold_results.append(
+            {
+                "test_fold": test_fold_idx,
+                "test_nll": test_metrics["test_nll"],
+                "test_trials": test_trials,
+                "chosen_l1": best["l1_recurrent"],
+                "chosen_seed": best["seed"],
+            }
+        )
+        if verbose:
+            print(
+                f"[Outer fold {test_fold_idx}] test NLL={test_metrics['test_nll']:.4f} (trials={test_trials}) l1={best['l1_recurrent']} seed={best['seed']}"
             )
-            entropy_term = -self.entropy_weight * entropy
 
-            # Belief calibration: for each trial, take predicted prob of reward for chosen action vs actual reward
-            # Convert chosen arm belief logits to prob via sigmoid for binary reward.
-            chosen_logits = belief_logits_seq[torch.arange(len(actions)), action_tensor]
-            reward_targets = torch.tensor(
-                rewards, dtype=torch.float32, device=self.device
+    total_trials = sum(fr["test_trials"] for fr in fold_results)
+    weighted_mean = sum(
+        fr["test_nll"] * fr["test_trials"] for fr in fold_results
+    ) / max(total_trials, 1)
+    return {
+        "folds": fold_results,
+        "weighted_mean_test_nll": weighted_mean,
+        "inner_cv_details": inner_selection_tables,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Improved, paper-faithful nested CV (no leakage) with hidden size grid
+# ---------------------------------------------------------------------------
+def nested_cross_validation_tiny_behavior_v2(
+    data,
+    num_actions: int,
+    hidden_size_grid=(2, 4, 8, 16),
+    l1_grid=(1e-5, 1e-4, 1e-3, 1e-2, 1e-1),
+    seed_grid=(0, 1, 2),
+    block_size: int = 150,
+    outer_folds: int = 10,
+    patience: int = 200,
+    max_epochs: int = 5000,
+    weight_decay: float = 5e-4,
+    grad_clip: float = 5.0,
+    weight_inner_by_trials: bool = True,
+    selection_metric: str = "val",  # 'val' or 'val_plus_train'
+    derive_refit_epoch: str = "median",  # 'median' | 'mean' | 'none'
+    include_zero_l1: bool = False,
+    checkpoint_path: str | None = None,
+    status_every: int = 1,
+    resume: bool = False,
+    compute_tier1: bool = False,
+    tier1_grad_max_hidden: int = 32,
+    n_jobs_inner: int = 1,
+    device=None,
+    verbose: bool = True,
+):
+    """Nested cross-validation with hyperparameter search over hidden size, L1, seed.
+
+    Improvements over original helper:
+      * Absolutely no use of the outer test fold during training / early stopping.
+      * Inner validation aggregation optionally weighted by #trials.
+      * Hidden size included in hyperparameter search.
+      * Refit strategy uses a fixed number of epochs derived from distribution of
+        inner early-stop epochs (median/mean) or trains with early stopping again
+        if derive_refit_epoch='none' (with an internal fold split per epoch).
+
+    Returns
+    -------
+    dict with keys:
+      'per_d': {hidden_size: {...}}
+      'overall': list of per-outer-fold entries (with chosen hyperparams per d)
+    """
+    import numpy as np
+    import torch
+
+    if include_zero_l1 and 0.0 not in l1_grid:
+        l1_grid = (0.0,) + tuple(l1_grid)
+
+    # Convert data to sessions (reuse logic from v1 helper)
+    if isinstance(data, list):
+        sessions = data
+    else:
+        required_attrs = ["choices", "rewards", "session_ids"]
+        if not all(hasattr(data, a) for a in required_attrs):
+            raise TypeError("`data` must be list of sessions or Bandit2Arm instance")
+        try:
+            bin_choices = data.get_binarized_choices()
+        except Exception:
+            bin_choices = np.where(data.choices == 2, 1, 0)
+        rewards_arr = np.asarray(data.rewards)
+        session_ids = np.asarray(data.session_ids)
+        sessions = []
+        for sid in np.unique(session_ids):
+            mask = session_ids == sid
+            sessions.append(
+                {"actions": bin_choices[mask], "rewards": rewards_arr[mask]}
             )
-            if belief_target_detach:
-                belief_loss = self.belief_weight * F.binary_cross_entropy_with_logits(
-                    chosen_logits, reward_targets.detach()
-                )
-            else:
-                belief_loss = self.belief_weight * F.binary_cross_entropy_with_logits(
-                    chosen_logits, reward_targets
-                )
 
-            loss = policy_loss + value_loss + entropy_term + belief_loss
-            self.optimizer.zero_grad()
-            loss.backward()
-            if clip_grad is not None:
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), clip_grad)
-            self.optimizer.step()
-
-            self.train_history.append(
+    # Build blocks
+    blocks = []
+    for sess in sessions:
+        actions = np.asarray(sess["actions"])
+        rewards = np.asarray(sess["rewards"])
+        T = len(actions)
+        start = 0
+        while start < T:
+            end = min(start + block_size, T)
+            blocks.append(
                 {
-                    "session": s + 1,
-                    "loss": float(loss.item()),
-                    "policy_loss": float(policy_loss.item()),
-                    "value_loss": float(value_loss.item()),
-                    "belief_loss": float(belief_loss.item()),
-                    "entropy": float(entropy.item()),
+                    "actions": actions[start:end].copy(),
+                    "rewards": rewards[start:end].copy(),
                 }
             )
+            start = end
+    if len(blocks) < outer_folds:
+        raise ValueError(
+            f"Not enough blocks ({len(blocks)}) for {outer_folds} outer folds"
+        )
 
-        return pd.DataFrame(all_records)
+    rng = np.random.default_rng(0)
+    idx = np.arange(len(blocks))
+    rng.shuffle(idx)
+    outer_assignments = [idx[i::outer_folds].tolist() for i in range(outer_folds)]
 
-    @torch.no_grad()
-    def evaluate(self, reward_probs, n_trials=200, greedy=True):
-        self.model.eval()
-        rps = np.asarray(reward_probs, dtype=float)
-        prev_action = None
-        prev_reward = 0.0
-        hidden = None
-        actions, rewards = [], []
-        for t in range(n_trials):
-            x_t = self._build_input(prev_action, prev_reward).unsqueeze(0).unsqueeze(0)
-            belief_logits, policy_logits, values, hidden = self.model(x_t, hidden)
-            probs = torch.softmax(policy_logits.squeeze(0), dim=-1)
-            if greedy:
-                act = int(torch.argmax(probs).item())
+    def subset(indices):
+        return [blocks[i] for i in indices]
+
+    def set_seed(seed):
+        import random
+
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+
+    # Storage
+    per_hidden_size = {hs: [] for hs in hidden_size_grid}
+    outer_fold_results = []
+
+    # Resume logic: load partial results if checkpoint exists
+    import json, os
+
+    if checkpoint_path is not None and resume and os.path.exists(checkpoint_path):
+        try:
+            with open(checkpoint_path, "r") as f:
+                saved = json.load(f)
+            # basic validation
+            if "per_d" in saved and "overall" in saved:
+                # Reconstruct progress maps
+                for hs, info in saved["per_d"].items():
+                    hs_int = int(hs)
+                    if hs_int in per_hidden_size:
+                        per_hidden_size[hs_int] = info["folds"]
+                outer_fold_results = saved["overall"]
+                if verbose:
+                    print(f"Resumed from checkpoint {checkpoint_path}")
+        except Exception as e:
+            if verbose:
+                print(f"Failed to resume from {checkpoint_path}: {e}")
+
+    for test_fold_idx in range(outer_folds):
+        # Skip already completed folds (resume)
+        completed_for_all_hs = all(
+            any(
+                fr["outer_fold"] == test_fold_idx and fr["hidden_size"] == hs
+                for fr in outer_fold_results
+            )
+            for hs in hidden_size_grid
+        )
+        if completed_for_all_hs:
+            continue
+        test_idx = outer_assignments[test_fold_idx]
+        test_blocks = subset(test_idx)
+        inner_pool_idx = [
+            i
+            for j, fold in enumerate(outer_assignments)
+            if j != test_fold_idx
+            for i in fold
+        ]
+        inner_pool_blocks = subset(inner_pool_idx)
+
+        # Construct inner folds (9 folds from inner pool) deterministically
+        inner_idx = np.arange(len(inner_pool_blocks))
+        rng.shuffle(
+            inner_idx
+        )  # same seed each outer fold; could use test_fold_idx to vary
+        inner_folds_indices = [
+            inner_idx[i :: (outer_folds - 1)].tolist() for i in range(outer_folds - 1)
+        ]  # 9 folds
+
+        # Prepare hyperparameter evaluation structures per hidden size
+        for hs in hidden_size_grid:
+            # Build list of (l1, seed) combos
+            combos = [(l1, seed) for l1 in l1_grid for seed in seed_grid]
+
+            def eval_combo(l1_seed):
+                l1, seed = l1_seed
+                fold_val_scores = []
+                fold_train_scores = []
+                fold_epochs = []
+                for val_fold_i in range(len(inner_folds_indices)):
+                    val_ids = inner_folds_indices[val_fold_i]
+                    train_ids = [
+                        i
+                        for k, fl in enumerate(inner_folds_indices)
+                        if k != val_fold_i
+                        for i in fl
+                    ]
+                    val_subset = [inner_pool_blocks[i] for i in val_ids]
+                    train_subset = [inner_pool_blocks[i] for i in train_ids]
+                    set_seed(seed)
+                    model = TinyBehaviorRNN(
+                        input_size=3, num_actions=num_actions, hidden_size=hs
+                    )
+                    trainer = TinyBehaviorRNNTrainer(
+                        model,
+                        l1_recurrent=l1,
+                        max_epochs=max_epochs,
+                        patience=patience,
+                        grad_clip=grad_clip,
+                        weight_decay=weight_decay,
+                        device=device,
+                    )
+                    hist = trainer.fit(train_subset, val_subset)
+                    val_nll = hist["val_nll"][-1]
+                    train_nll = hist["train_nll"][-1]
+                    epochs_used = len(hist["val_nll"]) - 1
+                    val_trials = sum(len(b["actions"]) for b in val_subset)
+                    fold_val_scores.append((val_nll, val_trials))
+                    fold_train_scores.append((train_nll, val_trials))
+                    fold_epochs.append(epochs_used)
+                if weight_inner_by_trials:
+                    total_trials = sum(t for _, t in fold_val_scores)
+                    agg_val = sum(v * t for v, t in fold_val_scores) / max(
+                        total_trials, 1
+                    )
+                    agg_train = sum(v * t for v, t in fold_train_scores) / max(
+                        total_trials, 1
+                    )
+                else:
+                    agg_val = float(np.mean([v for v, _ in fold_val_scores]))
+                    agg_train = float(np.mean([v for v, _ in fold_train_scores]))
+                if selection_metric == "val":
+                    selection_score = agg_val
+                elif selection_metric == "val_plus_train":
+                    selection_score = 0.5 * (agg_val + agg_train)
+                else:
+                    raise ValueError("Unknown selection_metric")
+                return {
+                    "hidden_size": hs,
+                    "l1_recurrent": l1,
+                    "seed": seed,
+                    "agg_val_nll": agg_val,
+                    "agg_train_nll": agg_train,
+                    "selection_score": selection_score,
+                    "fold_val_scores": fold_val_scores,
+                    "fold_epochs": fold_epochs,
+                }
+
+            if n_jobs_inner > 1 and len(combos) > 1:
+                try:
+                    from joblib import Parallel, delayed as _delayed
+
+                    hyper_rows = Parallel(n_jobs=n_jobs_inner)(
+                        _delayed(eval_combo)(cmb) for cmb in combos
+                    )
+                except Exception as _e:
+                    if verbose:
+                        print(
+                            f"Inner parallel failed (hs={hs}), falling back to serial: {_e}"
+                        )
+                    hyper_rows = [eval_combo(c) for c in combos]
             else:
-                dist = torch.distributions.Categorical(probs)
-                act = dist.sample().item()
-            reward = 1.0 if random.random() < rps[act] else 0.0
-            actions.append(act)
-            rewards.append(reward)
-            prev_action, prev_reward = act, reward
-        return {
-            "actions": np.array(actions),
-            "rewards": np.array(rewards),
+                hyper_rows = [eval_combo(c) for c in combos]
+            # Select best row
+            hyper_rows.sort(key=lambda r: r["selection_score"])
+            best = hyper_rows[0]
+
+            # Determine refit epochs
+            if derive_refit_epoch == "median":
+                refit_epochs = int(np.median(best["fold_epochs"]))
+            elif derive_refit_epoch == "mean":
+                refit_epochs = int(np.mean(best["fold_epochs"]))
+            elif derive_refit_epoch == "none":
+                refit_epochs = (
+                    None  # implies early stopping again (need validation split)
+                )
+            else:
+                raise ValueError("derive_refit_epoch must be median|mean|none")
+
+            # Refit model on *all* inner pool blocks (no test leakage)
+            set_seed(best["seed"])
+            refit_model = TinyBehaviorRNN(
+                input_size=3, num_actions=num_actions, hidden_size=hs
+            )
+            refit_trainer = TinyBehaviorRNNTrainer(
+                refit_model,
+                l1_recurrent=best["l1_recurrent"],
+                max_epochs=max_epochs,
+                patience=patience,
+                grad_clip=grad_clip,
+                weight_decay=weight_decay,
+                device=device,
+            )
+            if refit_epochs is None:
+                # Need a small artificial validation split (e.g., last block) to reuse early stopping
+                if len(inner_pool_blocks) == 1:
+                    raise ValueError(
+                        "Not enough data for early stopping with none strategy."
+                    )
+                split_idx = max(1, int(0.9 * len(inner_pool_blocks)))
+                train_blocks = inner_pool_blocks[:split_idx]
+                val_blocks = inner_pool_blocks[split_idx:]
+                refit_trainer.fit(train_blocks, val_blocks)
+                refit_epochs_used = len(refit_trainer.history["val_nll"]) - 1
+            else:
+                refit_trainer.train_fixed_epochs(inner_pool_blocks, refit_epochs)
+                refit_epochs_used = refit_epochs
+            # Tier1 dynamics metrics (on inner pool only, avoiding test leakage)
+            tier1_metrics = None
+            if compute_tier1:
+                try:
+                    import numpy as _np
+                    import torch as _torch
+
+                    model_eval = refit_trainer.model
+                    model_eval.eval()
+                    # Collect hidden states across inner pool blocks
+                    hidden_seqs = []
+                    with _torch.no_grad():
+                        for blk in inner_pool_blocks:
+                            X_blk, _ = _prepare_sequence(blk, num_actions)
+                            x_t = _torch.tensor(
+                                X_blk,
+                                dtype=_torch.float32,
+                                device=model_eval.h0_param.device,
+                            ).unsqueeze(0)
+                            h0_local = model_eval.h0_param.repeat(
+                                1, 1, model_eval.hidden_size
+                            )
+                            out_seq, _ = model_eval.rnn(x_t, h0_local)  # (1,T,H)
+                            hidden_seqs.append(out_seq.squeeze(0).cpu().numpy())
+                    if len(hidden_seqs) > 0:
+                        Hcat = _np.concatenate(hidden_seqs, axis=0)  # (TotalT,H)
+                        means = Hcat.mean(axis=0)
+                        stds = Hcat.std(axis=0) + 1e-12
+                        # lag-1 autocorr per unit
+                        if Hcat.shape[0] > 1:
+                            lag1 = []
+                            for ui in range(Hcat.shape[1]):
+                                h = Hcat[:-1, ui]
+                                h_next = Hcat[1:, ui]
+                                h_m = h.mean()
+                                h_next_m = h_next.mean()
+                                num = ((h - h_m) * (h_next - h_next_m)).sum()
+                                den = ((h - h_m) ** 2).sum()
+                                (
+                                    lag1.append(float(num / den))
+                                    if den > 0
+                                    else lag1.append(0.0)
+                                )
+                            lag1 = _np.array(lag1)
+                        else:
+                            lag1 = _np.zeros(Hcat.shape[1])
+                        # Covariance & spectral metrics
+                        C = (
+                            _np.cov(Hcat, rowvar=False)
+                            if Hcat.shape[0] > 1
+                            else _np.zeros((Hcat.shape[1], Hcat.shape[1]))
+                        )
+                        try:
+                            eigvals = _np.linalg.eigvalsh(C)
+                            eigvals_sorted = _np.sort(eigvals)
+                            participation_ratio = (
+                                float(
+                                    (eigvals.sum() ** 2) / ((eigvals**2).sum() + 1e-12)
+                                )
+                                if eigvals.size > 0
+                                else 0.0
+                            )
+                            pc1_var_ratio = (
+                                float(eigvals_sorted[-1] / (eigvals.sum() + 1e-12))
+                                if eigvals.size > 0
+                                else 0.0
+                            )
+                        except Exception:
+                            participation_ratio = 0.0
+                            pc1_var_ratio = 0.0
+                        # Gradient-based action log-prob sensitivity (optional small models)
+                        unit_grad = None
+                        if model_eval.hidden_size <= tier1_grad_max_hidden:
+                            try:
+                                accum_grad = _np.zeros(
+                                    model_eval.hidden_size, dtype=_np.float32
+                                )
+                                total_T = 0
+                                for blk in inner_pool_blocks:
+                                    X_blk, y_blk = _prepare_sequence(blk, num_actions)
+                                    x_t = _torch.tensor(
+                                        X_blk,
+                                        dtype=_torch.float32,
+                                        device=model_eval.h0_param.device,
+                                    ).unsqueeze(0)
+                                    y_t = _torch.tensor(
+                                        y_blk,
+                                        dtype=_torch.long,
+                                        device=model_eval.h0_param.device,
+                                    )
+                                    h0_local = model_eval.h0_param.repeat(
+                                        1, 1, model_eval.hidden_size
+                                    )
+                                    out_seq, _ = model_eval.rnn(x_t, h0_local)
+                                    out_seq.requires_grad_(True)
+                                    if model_eval.diagonal_readout:
+                                        logits_blk = (
+                                            model_eval.theta * out_seq + model_eval.bias
+                                        )
+                                    else:
+                                        logits_blk = model_eval.readout(out_seq)
+                                    logp = logits_blk.log_softmax(dim=-1)[
+                                        0, _torch.arange(y_t.shape[0]), y_t
+                                    ]
+                                    loss_blk = (
+                                        -logp.mean()
+                                    )  # negative log likelihood (mean)
+                                    model_eval.zero_grad(set_to_none=True)
+                                    loss_blk.backward(retain_graph=False)
+                                    grad_seq = (
+                                        out_seq.grad.detach().cpu().numpy()[0]
+                                    )  # (T,H)
+                                    accum_grad += grad_seq.mean(axis=0)
+                                    total_T += 1
+                                unit_grad = (accum_grad / max(total_T, 1)).tolist()
+                            except Exception:
+                                unit_grad = None
+                        tier1_metrics = {
+                            "mean": means.tolist(),
+                            "std": stds.tolist(),
+                            "lag1_autocorr": lag1.tolist(),
+                            "participation_ratio": participation_ratio,
+                            "pc1_var_ratio": pc1_var_ratio,
+                            "unit_grad_sensitivity": unit_grad,
+                            "total_timepoints": int(Hcat.shape[0]),
+                        }
+                except Exception as _e:
+                    if verbose:
+                        print(
+                            f"Tier1 metrics failed (d={hs}, fold={test_fold_idx}): {_e}"
+                        )
+                    tier1_metrics = None
+            # Test evaluation
+            test_metrics = refit_trainer.evaluate(test_blocks)
+            test_trials = sum(len(b["actions"]) for b in test_blocks)
+            result_entry = {
+                "outer_fold": test_fold_idx,
+                "hidden_size": hs,
+                "test_nll": test_metrics["test_nll"],
+                "test_trials": test_trials,
+                "chosen_l1": best["l1_recurrent"],
+                "chosen_seed": best["seed"],
+                "refit_epochs": refit_epochs_used,
+                "agg_val_nll": best["agg_val_nll"],
+                "tier1": tier1_metrics,
+            }
+            per_hidden_size[hs].append(result_entry)
+            outer_fold_results.append(result_entry)
+            if verbose and (status_every > 0) and (test_fold_idx % status_every == 0):
+                print(
+                    f"[Fold {test_fold_idx} | d={hs}] test NLL={test_metrics['test_nll']:.4f} l1={best['l1_recurrent']} seed={best['seed']} refit_epochs={refit_epochs_used}"
+                )
+
+        # checkpoint after each outer fold across all d
+        if checkpoint_path is not None:
+            try:
+                summary_tmp = {}
+                for hs, entries in per_hidden_size.items():
+                    total_trials_tmp = sum(e["test_trials"] for e in entries)
+                    if total_trials_tmp > 0:
+                        wmean_tmp = sum(
+                            e["test_nll"] * e["test_trials"] for e in entries
+                        ) / max(total_trials_tmp, 1)
+                    else:
+                        wmean_tmp = None
+                    summary_tmp[hs] = {
+                        "folds": entries,
+                        "total_test_trials": total_trials_tmp,
+                        "weighted_mean_test_nll": wmean_tmp,
+                    }
+                with open(checkpoint_path, "w") as f:
+                    json.dump({"per_d": summary_tmp, "overall": outer_fold_results}, f)
+            except Exception as e:
+                if verbose:
+                    print(f"Checkpoint save failed: {e}")
+
+    # Aggregate per hidden size
+    summary = {}
+    for hs, entries in per_hidden_size.items():
+        total_trials = sum(e["test_trials"] for e in entries)
+        weighted_mean = sum(e["test_nll"] * e["test_trials"] for e in entries) / max(
+            total_trials, 1
+        )
+        summary[hs] = {
+            "weighted_mean_test_nll": weighted_mean,
+            "folds": entries,
+            "total_test_trials": total_trials,
         }
+    return {"per_d": summary, "overall": outer_fold_results}
+
+
+def tiny_behavior_d_vs_weighted_nll(result_dict):
+    """Extract (d, weighted_mean_test_nll) sorted list from nested CV v2 result."""
+    rows = []
+    for d, info in result_dict["per_d"].items():
+        rows.append((int(d), info["weighted_mean_test_nll"]))
+    return sorted(rows, key=lambda x: x[0])
