@@ -572,6 +572,44 @@ class Bandit2Arm(BanditTask):
 
         return stats.entropy(choices_prob, base=2, axis=0)
 
+    def get_prob_hist_2d(self, stat="count"):
+        """Get the probability matrix for each session. Calculates a 2D histogram of the reward probabilities.
+
+        Returns
+        -------
+        2d array-like
+            The probability matrix for each session.
+        """
+        probs_combinations = self.probs[self.is_session_start, :]
+        p1_bins = np.linspace(0, 0.9, 10) + 0.05
+        p2_bins = np.linspace(0, 0.9, 10) + 0.05
+        H, xedges, yedges, _ = stats.binned_statistic_2d(
+            probs_combinations[:, 0].astype(float),
+            probs_combinations[:, 1].astype(float),
+            values=probs_combinations[:, 0],
+            statistic="count",
+            bins=[p1_bins, p2_bins],
+        )
+
+        if stat == "prop":
+            H = H / probs_combinations.shape[0]
+
+        return H.T, xedges, yedges
+
+    def get_trials_hist(self, bin_size=10):
+        """Get histogram of number of trials per session."""
+
+        ntrials_per_session = self.ntrials_session
+        min_trials = ntrials_per_session.min()
+        max_trials = ntrials_per_session.max()
+
+        h, bins = np.histogram(
+            ntrials_per_session,
+            bins=np.arange(min_trials, max_trials + bin_size, bin_size),
+        )
+
+        return h, bins[:-1] + bin_size / 2
+
 
 class Bandit4Arm(BanditTask):
     """
