@@ -610,6 +610,39 @@ class Bandit2Arm(BanditTask):
 
         return h, bins[:-1] + bin_size / 2
 
+    def get_performance_prob_grid(self):
+        """Get performance grid based on reward probabilities.
+
+        Parameters
+        ----------
+        bin_size : float, optional
+            Size of the bins for reward probabilities, by default 0.1
+
+        Returns
+        -------
+        performance_grid : 2D array
+            Grid of performance values.
+        xedges : 1D array
+            Edges of the bins along the x-axis.
+        yedges : 1D array
+            Edges of the bins along the y-axis.
+        """
+        probs_combinations = self.probs[self.is_session_start, :]
+        unique_combinations = np.unique(probs_combinations, axis=0)
+        bin_size = np.min(np.diff(probs_combinations[:, 0]))
+        performance = self.get_optimal_choice_probability()
+
+        p_bins = np.arange(0, 1 + bin_size, bin_size)
+        H, xedges, yedges, binnumber = stats.binned_statistic_2d(
+            probs_combinations[:, 0].astype(float),
+            probs_combinations[:, 1].astype(float),
+            values=performance,
+            statistic="mean",
+            bins=[p_bins, p_bins],
+        )
+
+        return H.T, xedges, yedges
+
 
 class Bandit4Arm(BanditTask):
     """
