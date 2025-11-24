@@ -203,6 +203,8 @@ class BanditTask(DataManager):
             choices=self.choices[mask],
             rewards=self.rewards[mask],
             session_ids=self.session_ids[mask],
+            block_ids=None if self.block_ids is None else self.block_ids[mask],
+            window_ids=None if self.window_ids is None else self.window_ids[mask],
             starts=None if self.starts is None else self.starts[mask],
             stops=None if self.stops is None else self.stops[mask],
             datetime=None if self.datetime is None else self.datetime[mask],
