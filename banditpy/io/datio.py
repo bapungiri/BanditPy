@@ -4,60 +4,122 @@ from pathlib import Path
 from ..core import Bandit2Arm
 
 
-def dat2ArmIO(folder: Path) -> Bandit2Arm:
-    # Concatenate all .dat files
+def _load_dat_frames(folder: Path) -> pd.DataFrame:
     files = sorted(folder.glob("*.dat"))
-    print(len(files))
+    if not files:
+        raise FileNotFoundError(f"No .dat files found in {folder}")
     dfs = [pd.read_csv(fp, sep=",", header=None) for fp in files]
-    data = pd.concat(dfs, ignore_index=True)
-    print(data.head())
-    print(data[1].dtype)
+    return pd.concat(dfs, ignore_index=True)
 
-    code = data[0].astype(str)
-    arg = data[1].to_numpy().astype(int)
-    prob = data[2].to_numpy().astype(int)
+
+def dat2ArmIO(folder: Path) -> Bandit2Arm:
+    """Two-armed bandit task stored as `.dat` logs.
+
+    Parameters
+    ----------
+    folder : Path
+        Directory containing one or more `.dat` files. Files are expected
+        to encode event `code`, `arg`, `prob`, and `dttime` columns.
+
+    Returns
+    -------
+    Bandit2Arm
+        Two-armed bandit task with trial choices, rewards, and arm probabilities.
+        Trial `starts` and `stops` are expressed in milliseconds relative to the
+        beginning of each session, while `datetime` retains the absolute outcome
+        timestamp (seconds since the recording clock origin).
+    """
+    data = _load_dat_frames(folder)
+
+    code = data[0].astype(str).to_numpy()
+    arg = pd.to_numeric(data[1], errors="coerce").to_numpy()
+    prob = pd.to_numeric(data[4], errors="coerce").to_numpy()
     dttime = data[5].to_numpy()
 
-    print(arg)
+    reward_map = {"51": 1, "-51": 0}  # ignore -52 (timeouts)
+    trials = []
 
-    data["datetime"] = dttime
-    # Probability updates
-    data["p1_update"] = np.where((code == "83") & (arg == 1), prob, np.nan)
-    data["p2_update"] = np.where((code == "83") & (arg == 2), prob, np.nan)
-    data["p1"] = data["p1_update"].ffill()
-    data["p2"] = data["p2_update"].ffill()
+    session_id = -1
+    p1 = np.nan
+    p2 = np.nan
+    current_port = np.nan
+    last_port_idx = -1
+    last_outcome_idx = -1
+    current_start = np.nan
+    session_start_ts = np.nan
 
-    # Session id increments when port1 prob line appears
-    data["session_id"] = np.cumsum((code == "83") & (arg == 1))
-    # Ensure first session starts at 1 (only if any updates exist)
-    if data["session_id"].gt(0).any():
-        data.loc[data["session_id"] > 0, "session_id"] += 0
+    for idx, (c, a, prb, ts) in enumerate(zip(code, arg, prob, dttime)):
+        ts_val = float(ts) if not pd.isna(ts) else np.nan
 
-    # Port poke updates
-    data["port_update"] = np.where((code == "81") & np.isin(arg, [1, 2]), arg, np.nan)
-    data["port"] = data["port_update"].ffill()
+        if c == "83" and not np.isnan(a):
+            if int(a) == 1:
+                session_id += 1
+                session_start_ts = ts_val
+                p1 = prb
+            elif int(a) == 2:
+                p2 = prb
+            continue
 
-    # Reward outcome mapping
-    reward_map = {"51": 1, "-51": 0, "-52": -1}
-    is_outcome = np.isin(code, list(reward_map.keys()))
-    outcomes = data.loc[is_outcome, ["port", "p1", "p2", "session_id", "datetime", 0]]
+        if c == "81" and np.isin(a, [1, 2]):
+            current_port = int(a)
+            last_port_idx = idx
+            current_start = ts_val
+            continue
 
-    print(outcomes.columns)
+        if c in reward_map:
+            stop_time = ts_val
+            if (
+                not np.isnan(current_port)
+                and last_port_idx > last_outcome_idx
+                and not np.isnan(p1)
+                and not np.isnan(p2)
+                and not np.isnan(current_start)
+                and not np.isnan(session_start_ts)
+                and not np.isnan(stop_time)
+            ):
+                start_ms = (current_start - session_start_ts) * 1000.0
+                stop_ms = (stop_time - session_start_ts) * 1000.0
+                trials.append(
+                    (
+                        int(current_port),
+                        reward_map[c],
+                        float(p1),
+                        float(p2),
+                        int(session_id),
+                        float(start_ms),
+                        float(stop_ms),
+                        float(stop_time),
+                    )
+                )
+            current_port = np.nan
+            current_start = np.nan
+            last_outcome_idx = idx
 
-    # Drop rows before first probabilities (port/prob may be NaN)
-    outcomes = outcomes.dropna(subset=["port", "p1", "p2", "session_id"])
+        elif c == "-52":
+            last_outcome_idx = idx
+            current_port = np.nan
+            current_start = np.nan
 
-    outcomes["port"] = outcomes["port"].astype(int)
-    outcomes["reward"] = outcomes[0].map(reward_map)
-    behav = outcomes.loc[
-        :, ["port", "reward", "p1", "p2", "session_id", "datetime"]
-    ].reset_index(drop=True)
-    behav[behav["reward"].isin([0, 1])]
+    behav = pd.DataFrame(
+        trials,
+        columns=[
+            "port",
+            "reward",
+            "p1",
+            "p2",
+            "session_id",
+            "start",
+            "stop",
+            "stop_time",
+        ],
+    )
 
     return Bandit2Arm(
         probs=behav[["p1", "p2"]].to_numpy(),
         choices=behav["port"].to_numpy(),
         rewards=behav["reward"].to_numpy(),
         session_ids=behav["session_id"].to_numpy(),
-        datetime=behav["datetime"].to_numpy(),
+        starts=behav["start"].to_numpy(),
+        stops=behav["stop"].to_numpy(),
+        datetime=behav["stop_time"].to_numpy(),
     )
