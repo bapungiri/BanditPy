@@ -222,6 +222,8 @@ class BanditTask(DataManager):
                 "choices": self.choices,
                 "rewards": self.rewards,
                 "session_ids": self.session_ids,
+                "block_ids": self.block_ids,
+                "window_ids": self.window_ids,
                 "starts": self.starts,
                 "stops": self.stops,
                 "datetime": self.datetime,
