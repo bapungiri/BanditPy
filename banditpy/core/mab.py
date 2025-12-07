@@ -614,7 +614,7 @@ class Bandit2Arm(BanditTask):
 
         return h, bins[:-1] + bin_size / 2
 
-    def get_performance_prob_grid(self):
+    def get_performance_prob_grid(self, n_last_trials=5):
         """Get performance grid based on reward probabilities.
 
         Parameters
@@ -631,21 +631,25 @@ class Bandit2Arm(BanditTask):
         yedges : 1D array
             Edges of the bins along the y-axis.
         """
-        probs_combinations = self.probs[self.is_session_start, :]
-        unique_combinations = np.unique(probs_combinations, axis=0)
-        bin_size = np.min(np.diff(probs_combinations[:, 0]))
-        performance = self.get_optimal_choice_probability()
+        probs = self.probs
+        unique_probs = np.unique(probs.flatten())
 
-        p_bins = np.arange(0, 1 + bin_size, bin_size)
-        H, xedges, yedges, binnumber = stats.binned_statistic_2d(
-            probs_combinations[:, 0].astype(float),
-            probs_combinations[:, 1].astype(float),
-            values=performance,
-            statistic="mean",
-            bins=[p_bins, p_bins],
-        )
+        perf_mat = np.zeros((len(unique_probs), len(unique_probs)))
 
-        return H.T, xedges, yedges
+        for i1, p1 in enumerate(unique_probs):
+            for i2, p2 in enumerate(unique_probs):
+                p1p2_mask = (probs[:, 0] == p1) & (probs[:, 1] == p2)
+                p2p1_mask = (probs[:, 0] == p2) & (probs[:, 1] == p1)
+                mask = p1p2_mask | p2p1_mask
+
+                if mask.sum() > 100:
+                    task_p1p2 = self._filtered(mask)
+                    perf_p1p2 = task_p1p2.get_optimal_choice_probability()[
+                        -n_last_trials:
+                    ].mean()
+                    perf_mat[i1, i2] = perf_p1p2
+
+        return perf_mat, unique_probs
 
 
 class Bandit4Arm(BanditTask):
