@@ -135,6 +135,8 @@ class SwitchProb2Arm:
             seq[seq == "-2"] = "b"
             seq[seq == "2"] = "B"
 
+            print(seq)
+
             # sort_indx = np.lexsort((seq[:, 1], seq[:, 2]))
             arr = np.array(list(zip(seq[:, -1], seq[:, -2], np.arange(seq.shape[0]))))
 
