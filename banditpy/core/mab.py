@@ -651,6 +651,55 @@ class Bandit2Arm(BanditTask):
 
         return perf_mat, unique_probs
 
+    def compare_reward_alignment(self) -> pd.DataFrame:
+        """
+        Compare the empirical reward rate of the majority-chosen arm in each session
+        against the programmed reward probability for that arm.
+
+        Returns
+        -------
+        pd.DataFrame
+            Columns:
+                - session_id: session identifier.
+                - prog_rew: programmed reward probability for the dominant arm.
+                - emp_rew: empirical mean reward when that arm was chosen.
+                - session_trials: total trials in that session.
+                - dominant_trials: number of times the dominant arm was chosen.
+                - reward_diff: absolute difference between emp_rew and prog_rew.
+        """
+        prog_rew = self.probs[np.arange(self.n_trials), self.choices - 1]
+        df = pd.DataFrame(
+            {
+                "session_id": self.session_ids,
+                "choice": self.choices,
+                "prog_rew": prog_rew,
+                "reward": self.rewards,
+            }
+        )
+
+        session_counts = df.groupby("session_id").size()
+        df["session_trials"] = df["session_id"].map(session_counts)
+
+        majority_choice = (
+            df.groupby(["session_id", "choice"])
+            .size()
+            .unstack(fill_value=0)
+            .idxmax(axis=1)
+        )
+        df = df[df["choice"] == df["session_id"].map(majority_choice)]
+
+        dominant_counts = df.groupby("session_id").size()
+        df["dominant_trials"] = df["session_id"].map(dominant_counts)
+
+        out = df.groupby(["session_id", "prog_rew"], as_index=False).agg(
+            emp_rew=("reward", "mean"),
+            session_trials=("session_trials", "first"),
+            dominant_trials=("dominant_trials", "first"),
+        )
+        out["reward_diff"] = np.abs(out["emp_rew"] - out["prog_rew"])
+
+        return out
+
 
 class Bandit4Arm(BanditTask):
     """
