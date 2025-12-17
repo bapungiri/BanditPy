@@ -3,6 +3,22 @@ from scipy.optimize import minimize
 from scipy.special import softmax
 from banditpy.core import Bandit2Arm
 
+import numpy as np
+from scipy.optimize import minimize
+from dataclasses import dataclass
+from banditpy.core import Bandit2Arm
+
+
+# ---------- Bounds Dataclass ----------
+@dataclass
+class Bounds:
+    explore_param: tuple = (1e-3, 10.0)
+    tau: tuple = (0.5, 0.999)
+    q_init: tuple = (0.0, 1.0)
+    lr_chosen: tuple = (0.0, 1.0)
+    lr_unchosen: tuple = (0.0, 1.0)
+    beta_softmax: tuple = (0.1, 20.0)
+
 
 class UCB2Arm:
     """
@@ -29,8 +45,28 @@ class UCB2Arm:
         lr_chosen     : learning rate for chosen arm
         lr_unchosen   : counterfactual learning rate
         beta_softmax  : inverse temperature
-
     """
+
+    PARAMS_BY_MODE = {
+        "classic": ["explore_param", "tau", "q_init", "beta_softmax"],
+        "bayesian": ["explore_param", "tau", "q_init", "beta_softmax"],
+        "rl": [
+            "explore_param",
+            "tau",
+            "q_init",
+            "lr_chosen",
+            "lr_unchosen",
+            "beta_softmax",
+        ],
+        "rl-bayesian": [
+            "explore_param",
+            "tau",
+            "q_init",
+            "lr_chosen",
+            "lr_unchosen",
+            "beta_softmax",
+        ],
+    }
 
     def __init__(
         self,
@@ -38,8 +74,9 @@ class UCB2Arm:
         reset_bool: np.ndarray | None = None,
         mode: str = "classic",
     ):
-        self.choices = np.asarray(task.choices, dtype=int) - 1
+        self.choices = np.asarray(task.choices, dtype=np.int32) - 1
         self.rewards = np.asarray(task.rewards, dtype=float)
+        assert task.n_ports == 2
 
         if reset_bool is None:
             self.reset_bool = task.is_session_start.astype(bool)
@@ -47,226 +84,170 @@ class UCB2Arm:
             self.reset_bool = np.asarray(reset_bool, dtype=bool)
 
         self.mode = mode.lower()
-        assert self.mode in {
-            "classic",
-            "rl",
-            "rl-bayesian",
-            "bayesian",
-        }
+        assert self.mode in self.PARAMS_BY_MODE
 
-        self.n_trials = len(self.choices)
+        self.n_trials = self.choices.size
         self.params = None
         self.nll = None
+
+        self.set_bounds = Bounds()
         self._prior_strength = 2.0
 
-    # --------------------------------------------------
-    def _softmax_ll(self, scores, choice, beta):
-        probs = softmax(beta * scores)
-        return -np.log(np.maximum(probs[choice], 1e-12))
+    # ---------- Utilities ----------
+    @staticmethod
+    def _softmax(x, beta):
+        z = beta * (x - np.max(x))
+        exp_z = np.exp(z)
+        return exp_z / np.sum(exp_z)
 
-    # --------------------------------------------------
+    # ---------- Negative log-likelihood ----------
     def _calculate_log_likelihood(self, theta: np.ndarray) -> float:
-        (
-            explore_param,
-            tau,
-            q_init,
-            lr_chosen,
-            lr_unchosen,
-            beta_softmax,
-        ) = theta
+        names = self.PARAMS_BY_MODE[self.mode]
+        p = dict(zip(names, theta))
 
         nll = 0.0
 
         match self.mode:
 
-            # ==============================================
             case "classic":
-                q = np.full(2, q_init)
-                n = np.zeros(2)
-                N = 0.0
+                q = np.full(2, p["q_init"])
+                pulls = np.zeros(2)
+                total = 0.0
 
-                for c, r, reset in zip(self.choices, self.rewards, self.reset_bool):
+                for a, r, reset in zip(self.choices, self.rewards, self.reset_bool):
                     if reset:
-                        q[:] = q_init
-                        n[:] = 0
-                        N = 0
+                        q[:] = p["q_init"]
+                        pulls[:] = 0.0
+                        total = 0.0
                     else:
-                        q = q_init + tau * (q - q_init)
-                        n *= tau
-                        N *= tau
+                        q = p["q_init"] + p["tau"] * (q - p["q_init"])
+                        pulls *= p["tau"]
+                        total *= p["tau"]
 
-                    bonus = explore_param * np.sqrt(
-                        np.log(N + 1.0) / np.maximum(n, 1e-12)
+                    bonus = p["explore_param"] * np.sqrt(
+                        np.log(total + 1.0) / np.maximum(pulls, 1e-12)
                     )
                     scores = q + bonus
-                    nll += self._softmax_ll(scores, c, beta_softmax)
+                    probs = self._softmax(scores, p["beta_softmax"])
 
-                    n[c] += 1
-                    N += 1
-                    q[c] += (r - q[c]) / n[c]
+                    nll -= np.log(probs[a] + 1e-12)
 
-            # ==============================================
+                    pulls[a] += 1.0
+                    total += 1.0
+                    q[a] += (r - q[a]) / pulls[a]
+
             case "rl":
-                q = np.full(2, q_init)
-                n = np.zeros(2)
-                N = 0.0
+                q = np.full(2, p["q_init"])
+                pulls = np.zeros(2)
+                total = 0.0
 
-                for c, r, reset in zip(self.choices, self.rewards, self.reset_bool):
+                for a, r, reset in zip(self.choices, self.rewards, self.reset_bool):
                     if reset:
-                        q[:] = q_init
-                        n[:] = 0
-                        N = 0
+                        q[:] = p["q_init"]
+                        pulls[:] = 0.0
+                        total = 0.0
                     else:
-                        q *= tau
-                        n *= tau
-                        N *= tau
+                        q *= p["tau"]
+                        pulls *= p["tau"]
+                        total *= p["tau"]
 
-                    bonus = explore_param * np.sqrt(
-                        np.log(N + 1.0) / np.maximum(n, 1e-12)
+                    bonus = p["explore_param"] * np.sqrt(
+                        np.log(total + 1.0) / np.maximum(pulls, 1e-12)
                     )
                     scores = q + bonus
-                    nll += self._softmax_ll(scores, c, beta_softmax)
+                    probs = self._softmax(scores, p["beta_softmax"])
 
-                    n[c] += 1
-                    N += 1
-                    other = 1 - c
+                    nll -= np.log(probs[a] + 1e-12)
 
-                    q[c] += lr_chosen * (r - q[c])
-                    q[other] += lr_unchosen * ((1 - r) - q[other])
+                    pulls[a] += 1.0
+                    total += 1.0
+                    other = 1 - a
 
-            # ==============================================
+                    q[a] += p["lr_chosen"] * (r - q[a])
+                    q[other] += p["lr_unchosen"] * ((1 - r) - q[other])
+
             case "bayesian":
-                a0 = self._prior_strength * q_init
-                b0 = self._prior_strength * (1 - q_init)
+                alpha = np.full(2, self._prior_strength * p["q_init"])
+                beta = np.full(2, self._prior_strength * (1 - p["q_init"]))
 
-                alpha = np.full(2, a0)
-                beta = np.full(2, b0)
-
-                for c, r, reset in zip(self.choices, self.rewards, self.reset_bool):
-                    if reset:
-                        alpha[:] = a0
-                        beta[:] = b0
-                    else:
-                        alpha = a0 + tau * (alpha - a0)
-                        beta = b0 + tau * (beta - b0)
+                for a, r, reset in zip(self.choices, self.rewards, self.reset_bool):
+                    if not reset:
+                        alpha = self._prior_strength * p["q_init"] + p["tau"] * (
+                            alpha - self._prior_strength * p["q_init"]
+                        )
+                        beta = self._prior_strength * (1 - p["q_init"]) + p["tau"] * (
+                            beta - self._prior_strength * (1 - p["q_init"])
+                        )
 
                     mean = alpha / (alpha + beta)
                     var = alpha * beta / ((alpha + beta) ** 2 * (alpha + beta + 1))
-                    scores = mean + explore_param * np.sqrt(var)
-                    nll += self._softmax_ll(scores, c, beta_softmax)
+                    scores = mean + p["explore_param"] * np.sqrt(var)
 
-                    alpha[c] += r
-                    beta[c] += 1 - r
+                    probs = self._softmax(scores, p["beta_softmax"])
+                    nll -= np.log(probs[a] + 1e-12)
 
-            # ==============================================
+                    alpha[a] += r
+                    beta[a] += 1 - r
+
             case "rl-bayesian":
-                a0 = self._prior_strength * q_init
-                b0 = self._prior_strength * (1 - q_init)
+                alpha = np.full(2, self._prior_strength * p["q_init"])
+                beta = np.full(2, self._prior_strength * (1 - p["q_init"]))
 
-                alpha = np.full(2, a0)
-                beta = np.full(2, b0)
-
-                for c, r, reset in zip(self.choices, self.rewards, self.reset_bool):
-                    if reset:
-                        alpha[:] = a0
-                        beta[:] = b0
-                    else:
-                        alpha = a0 + tau * (alpha - a0)
-                        beta = b0 + tau * (beta - b0)
+                for a, r, reset in zip(self.choices, self.rewards, self.reset_bool):
+                    if not reset:
+                        alpha = self._prior_strength * p["q_init"] + p["tau"] * (
+                            alpha - self._prior_strength * p["q_init"]
+                        )
+                        beta = self._prior_strength * (1 - p["q_init"]) + p["tau"] * (
+                            beta - self._prior_strength * (1 - p["q_init"])
+                        )
 
                     mean = alpha / (alpha + beta)
                     var = alpha * beta / ((alpha + beta) ** 2 * (alpha + beta + 1))
-                    scores = mean + explore_param * np.sqrt(var)
-                    nll += self._softmax_ll(scores, c, beta_softmax)
+                    scores = mean + p["explore_param"] * np.sqrt(var)
 
-                    other = 1 - c
-                    alpha[c] += lr_chosen * r
-                    beta[c] += lr_chosen * (1 - r)
+                    probs = self._softmax(scores, p["beta_softmax"])
+                    nll -= np.log(probs[a] + 1e-12)
 
-                    alpha[other] += lr_unchosen * (1 - r)
-                    beta[other] += lr_unchosen * r
+                    alpha[a] += p["lr_chosen"] * r
+                    beta[a] += p["lr_chosen"] * (1 - r)
+
+                    other = 1 - a
+                    alpha[other] += p["lr_unchosen"] * p["q_init"]
+                    beta[other] += p["lr_unchosen"] * (1 - p["q_init"])
 
         return nll
 
-    def fit(
-        self,
-        explore_bounds=(1e-3, 10.0),
-        tau_bounds=(0.5, 0.999),
-        q_init_bounds=(0.0, 1.0),
-        lr_chosen_bounds=(-1.0, 1.0),
-        lr_unchosen_bounds=(-1.0, 1.0),
-        beta_bounds=(0.1, 20.0),
-        n_starts=10,
-        seed=None,
-    ):
-        """
-        Explicit, named bounds for all parameters.
-        Unused parameters are retained but marked as np.nan after fitting.
-        """
-
-        # ----DO NOT CHANGE the order of names ----
-        param_names = [
-            "explore_param",
-            "tau",
-            "q_init",
-            "lr_chosen",
-            "lr_unchosen",
-            "beta_softmax",
-        ]
-
-        bounds_dict = {
-            "explore_param": explore_bounds,
-            "tau": tau_bounds,
-            "q_init": q_init_bounds,
-            "lr_chosen": lr_chosen_bounds,
-            "lr_unchosen": lr_unchosen_bounds,
-            "beta_softmax": beta_bounds,
-        }
-
-        bounds = [bounds_dict[p] for p in param_names]
-        lo = np.array([b[0] for b in bounds])
-        hi = np.array([b[1] for b in bounds])
-
+    # ---------- Fit ----------
+    def fit(self, n_starts: int = 10, seed: int | None = None):
         rng = np.random.default_rng(seed)
+
+        names = self.PARAMS_BY_MODE[self.mode]
+        bounds = [getattr(self.set_bounds, k) for k in names]
+
         best_val = np.inf
         best_x = None
 
         for _ in range(n_starts):
-            x0 = lo + (hi - lo) * rng.random(len(bounds))
+            x0 = np.array([rng.uniform(lo, hi) for lo, hi in bounds])
             res = minimize(
                 self._calculate_log_likelihood,
                 x0,
                 method="L-BFGS-B",
                 bounds=bounds,
-                options=dict(maxiter=1000, ftol=1e-8),
             )
             if res.fun < best_val:
                 best_val = res.fun
                 best_x = res.x
 
-        if best_x is None:
-            raise RuntimeError("Optimization failed.")
-
-        # ---- Store parameters ----
-        self.params = dict(zip(param_names, best_x))
+        self.params = dict(zip(names, best_x))
         self.nll = float(best_val)
 
-        # ---- Mark unused parameters as NA ----
-        match self.mode:
-            case "classic":
-                self.params["lr_chosen"] = np.nan
-                self.params["lr_unchosen"] = np.nan
-            case "bayesian":
-                self.params["lr_chosen"] = np.nan
-                self.params["lr_unchosen"] = np.nan
-            case _:
-                pass
-
-    # --------------------------------------------------
-    def bic(self):
+    # ---------- Diagnostics ----------
+    def bic(self) -> float:
         if self.nll is None:
             return np.nan
-        k = 6
+        k = len(self.params)
         return k * np.log(self.n_trials) + 2 * self.nll
 
     def print_params(self):
@@ -275,15 +256,16 @@ class UCB2Arm:
             return
 
         def fmt(x):
-            return "NA" if x is None or np.isnan(x) else f"{x:.4f}"
+            return "NA" if x is None else f"{x:.4f}"
 
         print(f"mode = {self.mode}")
-        print(
-            f"explore_param = {fmt(self.params.get('explore_param'))}, "
-            f"tau = {fmt(self.params.get('tau'))}, "
-            f"q_init = {fmt(self.params.get('q_init'))}, "
-            f"lr_chosen = {fmt(self.params.get('lr_chosen'))}, "
-            f"lr_unchosen = {fmt(self.params.get('lr_unchosen'))}, "
-            f"beta_softmax = {fmt(self.params.get('beta_softmax'))}, "
-            f"NLL = {self.nll:.2f}"
-        )
+        for k in [
+            "explore_param",
+            "tau",
+            "q_init",
+            "lr_chosen",
+            "lr_unchosen",
+            "beta_softmax",
+        ]:
+            print(f"{k}: {fmt(self.params.get(k))}")
+        print(f"NLL: {self.nll:.2f}")
