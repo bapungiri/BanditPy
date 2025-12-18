@@ -203,6 +203,8 @@ class BanditTask(DataManager):
             choices=self.choices[mask],
             rewards=self.rewards[mask],
             session_ids=self.session_ids[mask],
+            block_ids=None if self.block_ids is None else self.block_ids[mask],
+            window_ids=None if self.window_ids is None else self.window_ids[mask],
             starts=None if self.starts is None else self.starts[mask],
             stops=None if self.stops is None else self.stops[mask],
             datetime=None if self.datetime is None else self.datetime[mask],
@@ -220,6 +222,8 @@ class BanditTask(DataManager):
                 "choices": self.choices,
                 "rewards": self.rewards,
                 "session_ids": self.session_ids,
+                "block_ids": self.block_ids,
+                "window_ids": self.window_ids,
                 "starts": self.starts,
                 "stops": self.stops,
                 "datetime": self.datetime,
@@ -571,6 +575,130 @@ class Bandit2Arm(BanditTask):
         choices_prob = np.vstack((port1_prob, port2_prob))
 
         return stats.entropy(choices_prob, base=2, axis=0)
+
+    def get_prob_hist_2d(self, stat="count"):
+        """Get the probability matrix for each session. Calculates a 2D histogram of the reward probabilities.
+
+        Returns
+        -------
+        2d array-like
+            The probability matrix for each session.
+        """
+        probs_combinations = self.probs[self.is_session_start, :]
+        p1_bins = np.linspace(0, 0.9, 10) + 0.05
+        p2_bins = np.linspace(0, 0.9, 10) + 0.05
+        H, xedges, yedges, _ = stats.binned_statistic_2d(
+            probs_combinations[:, 0].astype(float),
+            probs_combinations[:, 1].astype(float),
+            values=probs_combinations[:, 0],
+            statistic="count",
+            bins=[p1_bins, p2_bins],
+        )
+
+        if stat == "prop":
+            H = H / probs_combinations.shape[0]
+
+        return H.T, xedges, yedges
+
+    def get_trials_hist(self, bin_size=10):
+        """Get histogram of number of trials per session."""
+
+        ntrials_per_session = self.ntrials_session
+        min_trials = ntrials_per_session.min()
+        max_trials = ntrials_per_session.max()
+
+        h, bins = np.histogram(
+            ntrials_per_session,
+            bins=np.arange(min_trials, max_trials + bin_size, bin_size),
+        )
+
+        return h, bins[:-1] + bin_size / 2
+
+    def get_performance_prob_grid(self, n_last_trials=5):
+        """Get performance grid based on reward probabilities.
+
+        Parameters
+        ----------
+        bin_size : float, optional
+            Size of the bins for reward probabilities, by default 0.1
+
+        Returns
+        -------
+        performance_grid : 2D array
+            Grid of performance values.
+        xedges : 1D array
+            Edges of the bins along the x-axis.
+        yedges : 1D array
+            Edges of the bins along the y-axis.
+        """
+        probs = self.probs
+        unique_probs = np.unique(probs.flatten())
+
+        perf_mat = np.zeros((len(unique_probs), len(unique_probs)))
+
+        for i1, p1 in enumerate(unique_probs):
+            for i2, p2 in enumerate(unique_probs):
+                p1p2_mask = (probs[:, 0] == p1) & (probs[:, 1] == p2)
+                p2p1_mask = (probs[:, 0] == p2) & (probs[:, 1] == p1)
+                mask = p1p2_mask | p2p1_mask
+
+                if mask.sum() > 100:
+                    task_p1p2 = self._filtered(mask)
+                    perf_p1p2 = task_p1p2.get_optimal_choice_probability()[
+                        -n_last_trials:
+                    ].mean()
+                    perf_mat[i1, i2] = perf_p1p2
+
+        return perf_mat, unique_probs
+
+    def compare_reward_alignment(self) -> pd.DataFrame:
+        """
+        Compare the empirical reward rate of the majority-chosen arm in each session
+        against the programmed reward probability for that arm.
+
+        Returns
+        -------
+        pd.DataFrame
+            Columns:
+                - session_id: session identifier.
+                - prog_rew: programmed reward probability for the dominant arm.
+                - emp_rew: empirical mean reward when that arm was chosen.
+                - session_trials: total trials in that session.
+                - dominant_trials: number of times the dominant arm was chosen.
+                - reward_diff: absolute difference between emp_rew and prog_rew.
+        """
+        prog_rew = self.probs[np.arange(self.n_trials), self.choices - 1]
+        df = pd.DataFrame(
+            {
+                "session_id": self.session_ids,
+                "choice": self.choices,
+                "prog_rew": prog_rew,
+                "reward": self.rewards,
+            }
+        )
+
+        session_counts = df.groupby("session_id").size()
+        df["session_trials"] = df["session_id"].map(session_counts)
+
+        majority_choice = (
+            df.groupby(["session_id", "choice"])
+            .size()
+            .unstack(fill_value=0)
+            .idxmax(axis=1)
+        )
+        df = df[df["choice"] == df["session_id"].map(majority_choice)]
+
+        dominant_counts = df.groupby("session_id").size()
+        df["dominant_trials"] = df["session_id"].map(dominant_counts)
+
+        out = df.groupby(["session_id", "prog_rew"], as_index=False).agg(
+            emp_rew=("reward", "mean"),
+            session_trials=("session_trials", "first"),
+            dominant_trials=("dominant_trials", "first"),
+        )
+        out["reward_diff"] = np.abs(out["emp_rew"] - out["prog_rew"])
+
+        return out
 
 
 class Bandit4Arm(BanditTask):
