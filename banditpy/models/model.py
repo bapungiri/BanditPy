@@ -161,6 +161,24 @@ class DecisionModel:
             probs=None,  # block-varying, not a single vector
         )
 
+    def simulate_greedy(self):
+        self.policy.reset()
+        choices = []
+
+        for c, r, reset in zip(
+            self.task.choices, self.task.rewards, self.task.is_session_start
+        ):
+            if reset:
+                self.policy.reset()
+
+            logits = self.policy.logits()
+            choice = np.argmax(logits)
+            choices.append(choice + 1)
+
+            self.policy.update(choice, r)
+
+        return np.array(choices)
+
     def bic(self):
         if self.nll is None:
             raise RuntimeError("Model must be fit before computing BIC.")
