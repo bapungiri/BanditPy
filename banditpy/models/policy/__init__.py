@@ -1,1 +1,1 @@
-from .ucb import EmpiricalUCB, RLUCB, BasePolicy, RLBayesianUCB
+from .ucb import EmpiricalUCB, RLUCB, BasePolicy, BayesianUCB, RLBayesianUCB

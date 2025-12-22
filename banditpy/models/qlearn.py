@@ -41,6 +41,9 @@ class Qlearn2Arm:
         self.is_session_start = task.is_session_start
         self.session_ids = task.session_ids
         self.estimated_params = None
+        self.fit_fvals = None  # store objective values across restarts
+        self.fit_fval_mean = None
+        self.fit_fval_std = None
         self.model = model
         self.n_cpu = n_cpu
 
@@ -52,6 +55,11 @@ class Qlearn2Arm:
         elif self.model == "persev":
             a, b, c, d, e = self.estimated_params.round(4)
             print(f"alpha_c: {a}, alpha_u: {b},alpha_h: {c}, scaler: {d}, beta: {e}")
+
+        if self.fit_fval_mean is not None:
+            print(
+                f"fit NLL mean±SD across restarts: {self.fit_fval_mean:.3f} ± {self.fit_fval_std:.3f}"
+            )
 
     def compute_q_values(self, alpha_params):
         """
@@ -169,6 +177,9 @@ class Qlearn2Arm:
 
         idx_best = np.argmin(fval_vec)
         self.estimated_params = x_vec[idx_best]
+        self.fit_fvals = fval_vec
+        self.fit_fval_mean = float(np.mean(fval_vec))
+        self.fit_fval_std = float(np.std(fval_vec))
 
     def predict_choices(self, params, stochastic=True):
         """

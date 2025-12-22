@@ -35,11 +35,6 @@ class EmpiricalUCB(BasePolicy):
         self.q[choice] += (reward - self.q[choice]) / self.n[choice]
 
 
-# ============================================================
-# RL + UCB
-# ============================================================
-
-
 class RLUCB(BasePolicy):
     parameters = [
         ParameterSpec("explore", (1e-3, 10.0)),
@@ -80,11 +75,6 @@ class RLUCB(BasePolicy):
         self.t += 1.0
 
 
-# ============================================================
-# Bayesian UCB
-# ============================================================
-
-
 class BayesianUCB(BasePolicy):
     parameters = [
         ParameterSpec("explore", (1e-3, 10.0)),
@@ -123,11 +113,6 @@ class BayesianUCB(BasePolicy):
     def update(self, choice, reward):
         self.alpha[choice] += reward
         self.beta[choice] += 1 - reward
-
-
-# ============================================================
-# RL-Bayesian UCB
-# ============================================================
 
 
 class RLBayesianUCB(BasePolicy):
