@@ -107,8 +107,8 @@ class BanditTask(DataManager):
 
         self.probs = self._fix_probs(probs)
         self.choices = self._fix_choices(choices.astype(int))
-        self.rewards = rewards.astype(int)
-        self.session_ids = session_ids
+        self.rewards = self._fix_rewards(rewards.astype(int))
+        self.session_ids = self._fix_session_ids(session_ids)
 
         if starts is not None:
             assert starts.shape[0] == probs.shape[0], "starts should be of same length"
@@ -124,7 +124,7 @@ class BanditTask(DataManager):
 
         self.window_ids = window_ids
         self.block_ids = block_ids
-        self.datetime = datetime
+        self.datetime = self._fix_datetime(datetime)
 
         self.sessions, self.ntrials_session = np.unique(
             self.session_ids, return_counts=True
@@ -136,7 +136,40 @@ class BanditTask(DataManager):
 
     @staticmethod
     def _fix_choices(choices):
+        choices = np.squeeze(choices)
         return choices - choices.min() + 1
+
+    @staticmethod
+    def _fix_rewards(rewards):
+        rewards = np.squeeze(rewards)
+        return rewards - rewards.min()
+
+    @staticmethod
+    def _fix_datetime(datetime):
+        if datetime.ndim == 2:
+            datetime = np.squeeze(datetime)
+        if datetime is None:
+            return None
+        datetime = np.array(datetime)
+        if np.issubdtype(datetime.dtype, np.number):
+            datetime = datetime.astype("datetime64[s]")
+        return datetime
+
+    @staticmethod
+    def _fix_session_ids(session_ids):
+        session_ids = np.squeeze(session_ids)
+        sessdiff = np.diff(session_ids, prepend=session_ids[0])
+        neg_bool = np.where(sessdiff < 0, 1, 0)
+        session_starts = np.insert(np.where(sessdiff != 0)[0], 0, 0)
+        session_start_ids = np.arange(len(session_starts)) + 1
+
+        if np.sum(neg_bool) > 0:
+            session_ids = np.repeat(
+                session_start_ids,
+                np.diff(np.append(session_starts, len(session_ids))),
+            )
+
+        return session_ids
 
     @property
     def n_ports(self):
@@ -532,7 +565,7 @@ class Bandit2Arm(BanditTask):
         return sess_div_perf
 
     def get_reward_probability(self):
-        """Get the reward probabilities for each session.
+        """Get the reward probabilities across sessions.
 
         Returns
         -------
