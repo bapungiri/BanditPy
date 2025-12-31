@@ -6,7 +6,7 @@ from scipy.special import betainc, beta as Bfn
 from .base import BasePolicy, ParameterSpec
 
 
-class ThompsonSampling(BasePolicy):
+class Thompson2Arm(BasePolicy):
     """
     Thompson sampling with discounted evidence and counterfactual updates.
     Supports learning-rate tying via lr_mode.
