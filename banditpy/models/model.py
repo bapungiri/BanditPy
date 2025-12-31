@@ -136,6 +136,8 @@ class DecisionModel:
             n_jobs = _get_slurm_cpus(default=1)
         n_jobs = max(1, min(n_jobs, n_starts))
 
+        print(f"Using {n_jobs} workers")
+
         bounds_dict = self.policy.get_bounds()
         names = self.policy.param_names()
         bounds = [bounds_dict[n] for n in names]
