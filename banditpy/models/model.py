@@ -98,7 +98,7 @@ class DecisionModel:
         names = self.policy.param_names()
         params = dict(zip(names, theta))
 
-        self.policy.set_params(**params)
+        self.policy.set_params(params)
 
         beta = params["beta"]
         nll = 0.0
