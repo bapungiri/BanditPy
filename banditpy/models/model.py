@@ -47,7 +47,7 @@ class DecisionModel:
 
     # -------------------- RESET MODE --------------------
 
-    def _compute_ressets(self, task, reset_mode):
+    def _compute_resets(self, task, reset_mode):
         """
         reset_mode options:
             "session"  -> task.is_session_start
