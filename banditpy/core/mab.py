@@ -4,6 +4,7 @@ from scipy import stats
 from scipy.ndimage import gaussian_filter1d
 import pandas as pd
 from numpy.lib.stride_tricks import sliding_window_view
+from scipy import stats
 
 
 class BanditTask(DataManager):
@@ -107,8 +108,8 @@ class BanditTask(DataManager):
 
         self.probs = self._fix_probs(probs)
         self.choices = self._fix_choices(choices.astype(int))
-        self.rewards = rewards.astype(int)
-        self.session_ids = session_ids
+        self.rewards = self._fix_rewards(rewards.astype(int))
+        self.session_ids = self._fix_session_ids(session_ids)
 
         if starts is not None:
             assert starts.shape[0] == probs.shape[0], "starts should be of same length"
@@ -124,7 +125,7 @@ class BanditTask(DataManager):
 
         self.window_ids = window_ids
         self.block_ids = block_ids
-        self.datetime = datetime
+        self.datetime = self._fix_datetime(datetime)
 
         self.sessions, self.ntrials_session = np.unique(
             self.session_ids, return_counts=True
@@ -136,7 +137,40 @@ class BanditTask(DataManager):
 
     @staticmethod
     def _fix_choices(choices):
+        choices = np.squeeze(choices)
         return choices - choices.min() + 1
+
+    @staticmethod
+    def _fix_rewards(rewards):
+        rewards = np.squeeze(rewards)
+        return rewards - rewards.min()
+
+    @staticmethod
+    def _fix_datetime(datetime):
+        if datetime.ndim == 2:
+            datetime = np.squeeze(datetime)
+        if datetime is None:
+            return None
+        datetime = np.array(datetime)
+        if np.issubdtype(datetime.dtype, np.number):
+            datetime = datetime.astype("datetime64[s]")
+        return datetime
+
+    @staticmethod
+    def _fix_session_ids(session_ids):
+        session_ids = np.squeeze(session_ids)
+        sessdiff = np.diff(session_ids, prepend=session_ids[0])
+        neg_bool = np.where(sessdiff < 0, 1, 0)
+        session_starts = np.insert(np.where(sessdiff != 0)[0], 0, 0)
+        session_start_ids = np.arange(len(session_starts)) + 1
+
+        if np.sum(neg_bool) > 0:
+            session_ids = np.repeat(
+                session_start_ids,
+                np.diff(np.append(session_starts, len(session_ids))),
+            )
+
+        return session_ids
 
     @property
     def n_ports(self):
@@ -358,25 +392,33 @@ class Bandit2Arm(BanditTask):
         assert self.n_ports == 2, "Only implemented for 2AB task"
         return np.where(self.choices == 2, 1, 0)  # Port 1: 0 and Port 2: 1
 
-    def get_port_bias(df, min_trials=250):
+    def get_port_bias(self):
+        """Get the port bias as a function of delta probability.
 
-        ntrials_by_session = get_trial_metrics(df)[0]
+        Returns
+        -------
+        linfit : LinregressResult
+            The result of linear regression between delta probability and choice bias.
+        unique_prob_diff : np.ndarray
+            Unique delta probabilities.
+        choice_diff : np.ndarray
+            Mean choice bias for each unique delta probability.
+        """
 
-        delta_prob = df["rewprobfull1"] - df["rewprobfull2"]
-        port_choice = df["port"].to_numpy()
-        port_choice[port_choice == 2] = -1
-        is_choice_high = df["is_choice_high"]
-        max_diff = 80
-        nbins = int(2 * max_diff / 10) + 1
-        bins = np.linspace(-max_diff, max_diff, nbins)
+        prob_diff = np.diff(self.probs, axis=1).squeeze().round(2)
+        unique_prob_diff = np.unique(prob_diff)
 
-        mean_choice = stats.binned_statistic(
-            delta_prob, port_choice, bins=bins, statistic="mean"
-        )[0]
-        bin_centers = bins[:-1] + 5
-        # mean_choice[bin_centers < 0] = -1 * mean_choice[bin_centers < 0]
+        choices = self.choices
+        choices = np.where(choices == 2, 1, -1)
 
-        return mean_choice, bin_centers
+        choice_diff = np.array(
+            [np.mean(choices[prob_diff == pd]) for pd in unique_prob_diff]
+        )
+        good_idx = ~np.isnan(choice_diff)
+
+        linfit = stats.linregress(unique_prob_diff[good_idx], choice_diff[good_idx])
+
+        return linfit, unique_prob_diff, choice_diff
 
     @staticmethod
     def from_csv(
@@ -532,7 +574,7 @@ class Bandit2Arm(BanditTask):
         return sess_div_perf
 
     def get_reward_probability(self):
-        """Get the reward probabilities for each session.
+        """Get the reward probabilities across sessions.
 
         Returns
         -------
