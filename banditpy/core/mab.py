@@ -4,6 +4,7 @@ from scipy import stats
 from scipy.ndimage import gaussian_filter1d
 import pandas as pd
 from numpy.lib.stride_tricks import sliding_window_view
+from scipy import stats
 
 
 class BanditTask(DataManager):
@@ -391,25 +392,33 @@ class Bandit2Arm(BanditTask):
         assert self.n_ports == 2, "Only implemented for 2AB task"
         return np.where(self.choices == 2, 1, 0)  # Port 1: 0 and Port 2: 1
 
-    def get_port_bias(df, min_trials=250):
+    def get_port_bias(self):
+        """Get the port bias as a function of delta probability.
 
-        ntrials_by_session = get_trial_metrics(df)[0]
+        Returns
+        -------
+        linfit : LinregressResult
+            The result of linear regression between delta probability and choice bias.
+        unique_prob_diff : np.ndarray
+            Unique delta probabilities.
+        choice_diff : np.ndarray
+            Mean choice bias for each unique delta probability.
+        """
 
-        delta_prob = df["rewprobfull1"] - df["rewprobfull2"]
-        port_choice = df["port"].to_numpy()
-        port_choice[port_choice == 2] = -1
-        is_choice_high = df["is_choice_high"]
-        max_diff = 80
-        nbins = int(2 * max_diff / 10) + 1
-        bins = np.linspace(-max_diff, max_diff, nbins)
+        prob_diff = np.diff(self.probs, axis=1).squeeze().round(2)
+        unique_prob_diff = np.unique(prob_diff)
 
-        mean_choice = stats.binned_statistic(
-            delta_prob, port_choice, bins=bins, statistic="mean"
-        )[0]
-        bin_centers = bins[:-1] + 5
-        # mean_choice[bin_centers < 0] = -1 * mean_choice[bin_centers < 0]
+        choices = self.choices
+        choices = np.where(choices == 2, 1, -1)
 
-        return mean_choice, bin_centers
+        choice_diff = np.array(
+            [np.mean(choices[prob_diff == pd]) for pd in unique_prob_diff]
+        )
+        good_idx = ~np.isnan(choice_diff)
+
+        linfit = stats.linregress(unique_prob_diff[good_idx], choice_diff[good_idx])
+
+        return linfit, unique_prob_diff, choice_diff
 
     @staticmethod
     def from_csv(
