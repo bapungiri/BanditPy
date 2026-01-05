@@ -95,6 +95,7 @@ class DecisionModel:
     # -------------------- NLL --------------------
 
     def _nll(self, theta):
+        self.policy.reset()
         names = self.policy.param_names()
         params = dict(zip(names, theta))
 
