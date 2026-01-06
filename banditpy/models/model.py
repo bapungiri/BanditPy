@@ -1,10 +1,10 @@
 import numpy as np
-from scipy.optimize import minimize
 from scipy.special import logsumexp
 from banditpy.core import Bandit2Arm
 from .policy.base import BasePolicy
 from tqdm import tqdm
 import os
+from .optim import resolve_optimizer
 
 
 def softmax_loglik(logits, choice, beta):
@@ -120,19 +120,7 @@ class DecisionModel:
 
     # -------------------- FIT --------------------
 
-    def fit(
-        self,
-        n_starts=10,
-        seed=None,
-        progress=False,
-        n_jobs=None,
-        method="lbfgs",
-        de_popsize=15,
-        de_maxiter=200,
-        de_tol=1e-6,
-    ):
-        from joblib import Parallel, delayed
-
+    def fit(self, n_starts=10, seed=None, progress=False, n_jobs=None, optimizer=None):
         rng = np.random.default_rng(seed)
 
         if n_jobs is None:
@@ -143,52 +131,19 @@ class DecisionModel:
 
         bounds_dict = self.policy.get_bounds()
         names = self.policy.param_names()
-        bounds = [bounds_dict[n] for n in names]
+        bounds = [(n, bounds_dict[n]) for n in names]
 
         seeds = rng.integers(0, 2**32 - 1, size=n_starts)
 
-        def _run_single(start_seed):
-            local_rng = np.random.default_rng(start_seed)
+        opt = resolve_optimizer(optimizer)
 
-            if method.lower() == "de":
-                from scipy.optimize import differential_evolution
-
-                res = differential_evolution(
-                    self._nll,
-                    bounds=bounds,
-                    maxiter=de_maxiter,
-                    popsize=de_popsize,
-                    tol=de_tol,
-                    seed=int(local_rng.integers(0, 2**32 - 1)),
-                    polish=True,
-                )
-                return res.fun, res.x
-
-            x0 = np.array([local_rng.uniform(*b) for b in bounds])
-            res = minimize(
-                self._nll,
-                x0,
-                method="L-BFGS-B",
-                bounds=bounds,
-            )
-            return res.fun, res.x
-
-        iterator = seeds
-        if progress:
-            try:
-                iterator = tqdm(iterator, desc="Fitting DecisionModel")
-            except Exception:
-                pass
-
-        if n_jobs == 1:
-            results = [_run_single(s) for s in iterator]
-        else:
-            results = Parallel(n_jobs=n_jobs, backend="loky")(
-                delayed(_run_single)(s) for s in iterator
-            )
-
-        best_fun, best_x = min(results, key=lambda t: t[0])
-        fvals = np.array([r[0] for r in results], dtype=float)
+        best_fun, best_x, fvals = opt.fit(
+            objective=self._nll,
+            bounds=bounds,
+            seeds=seeds,
+            n_jobs=n_jobs,
+            progress=progress,
+        )
 
         self.params = dict(zip(names, best_x))
         self.nll = best_fun
