@@ -85,7 +85,7 @@ class ThompsonShared2Arm(BaseThompson2Arm):
         ParameterSpec("tau", (0.1, 0.999), description="Decay factor"),
         ParameterSpec("lr_chosen", (0.0, 1.0), description="LR (chosen arm)"),
         ParameterSpec("lr_unchosen", (0.0, 1.0), description="LR (unchosen arm)"),
-        ParameterSpec("beta", (0.1, 10.0), description="Inverse temperature"),
+        ParameterSpec("beta", (0.1, 20.0), description="Inverse temperature"),
     ]
 
     def update(self, choice, reward):
@@ -110,14 +110,20 @@ class ThompsonSplit2Arm(BaseThompson2Arm):
     """
 
     parameters: List[ParameterSpec] = [
-        ParameterSpec("alpha0", (1e-3, 20.0)),
-        ParameterSpec("beta0", (1e-3, 20.0)),
-        ParameterSpec("tau", (0.1, 0.999)),
-        ParameterSpec("lr_c_pos", (0.0, 1.0)),
-        ParameterSpec("lr_c_neg", (0.0, 1.0)),
-        ParameterSpec("lr_u_pos", (0.0, 1.0)),
-        ParameterSpec("lr_u_neg", (0.0, 1.0)),
-        ParameterSpec("beta", (0.1, 10.0)),
+        ParameterSpec("alpha0", (1, 20.0), description="Prior alpha"),
+        ParameterSpec("beta0", (1, 20.0), description="Prior beta"),
+        ParameterSpec("tau", (0.1, 0.999), description="Decay factor"),
+        ParameterSpec(
+            "lr_c_pos", (0.0, 1.0), description="LR (chosen arm, positive reward)"
+        ),
+        ParameterSpec("lr_c_neg", (0.0, 1.0), description="LR (chosen arm, no reward)"),
+        ParameterSpec(
+            "lr_u_pos", (0.0, 1.0), description="LR (unchosen arm, positive reward)"
+        ),
+        ParameterSpec(
+            "lr_u_neg", (0.0, 1.0), description="LR (unchosen arm, no reward)"
+        ),
+        ParameterSpec("beta", (0.1, 20.0), description="Inverse temperature"),
     ]
 
     def update(self, choice, reward):
