@@ -95,11 +95,13 @@ class DecisionModel:
     # -------------------- NLL --------------------
 
     def _nll(self, theta):
-        self.policy.reset()
         names = self.policy.param_names()
         params = dict(zip(names, theta))
 
         self.policy.set_params(params)
+
+        # reset after params are set so policies that read from self.params in reset don't KeyError
+        self.policy.reset()
 
         beta = params["beta"]
         nll = 0.0
