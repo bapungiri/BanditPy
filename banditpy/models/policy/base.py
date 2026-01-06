@@ -90,10 +90,6 @@ class BasePolicy:
         # Dict-style bounds API
         self.bounds = BoundsRegistry(self._param_specs)
 
-        # Ensure policy always starts in a valid state
-        # (reset() must not assume parameters already exist)
-        self.reset()
-
     # ---------------- Parameter API ----------------
 
     def param_names(self):
