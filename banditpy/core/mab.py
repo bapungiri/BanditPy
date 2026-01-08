@@ -230,6 +230,92 @@ class BanditTask(DataManager):
         mask = np.isin(self.session_ids, ids)
         return self._filtered(mask)
 
+    def filter_by_block_id(self, start=None, stop=None, ids=None):
+        """
+        Filter trials by block_id.
+
+        Parameters
+        ----------
+        start : int, optional
+            Inclusive lower bound for block_id (e.g., 2 for "2 onward").
+        stop : int, optional
+            Inclusive upper bound for block_id (e.g., 3 for "1 to 3").
+        ids : iterable of int, optional
+            Explicit set/list of block_ids to keep (overrides start/end if provided).
+
+        Examples
+        --------
+        - Blocks 1 only: filter_by_block_id(start=1, stop=1)
+        - Blocks 1-3:    filter_by_block_id(start=1, stop=3)
+        - Blocks 2+:     filter_by_block_id(start=2)
+        """
+        if self.block_ids is None:
+            raise ValueError("block_ids must be set to filter by block")
+
+        block_ids = np.asarray(self.block_ids)
+
+        if ids is not None:
+            ids = np.asarray(list(ids))
+            mask = np.isin(block_ids, ids)
+        else:
+            if start is None and stop is None:
+                raise ValueError("Provide start/stop or ids to filter blocks")
+
+            if start is None:
+                start = block_ids.min()
+            if stop is None:
+                stop = block_ids.max()
+
+            mask = (block_ids >= start) & (block_ids <= stop)
+
+        return self._filtered(mask)
+
+    def get_block_start_mask(self, start=None, stop=None, ids=None):
+        """
+        Boolean mask marking the first trial of specified blocks.
+
+        Parameters
+        ----------
+        start : int, optional
+            Inclusive lower bound for block_id (e.g., 2 for "2 onward").
+        stop : int, optional
+            Inclusive upper bound for block_id.
+        ids : iterable of int, optional
+            Explicit block_ids to mark; overrides start/stop if provided.
+
+        Returns
+        -------
+        np.ndarray
+            Boolean array of shape (n_trials,) with True at the first trial of
+            the selected blocks and False elsewhere.
+        """
+        if self.block_ids is None:
+            raise ValueError("block_ids must be set to compute block starts")
+
+        block_ids = np.asarray(self.block_ids)
+
+        if ids is not None:
+            target_ids = set(np.asarray(list(ids)).tolist())
+        else:
+            if start is None and stop is None:
+                raise ValueError("Provide start/stop or ids to select block starts")
+            if start is None:
+                start = block_ids.min()
+            if stop is None:
+                stop = block_ids.max()
+            target_ids = set(range(int(start), int(stop) + 1))
+
+        # Identify block start indices
+        block_start_bool = np.concatenate(([True], block_ids[1:] != block_ids[:-1]))
+        start_indices = np.where(block_start_bool)[0]
+
+        mask = np.zeros_like(block_ids, dtype=bool)
+        for idx in start_indices:
+            if block_ids[idx] in target_ids:
+                mask[idx] = True
+
+        return mask
+
     def _filtered(self, mask):
         """Return a new instance of the same class with filtered data."""
         return self.__class__(
