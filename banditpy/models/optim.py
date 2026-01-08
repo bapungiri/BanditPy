@@ -89,8 +89,8 @@ class OptunaOptimizer(BaseOptimizer):
     def fit(self, objective, bounds, seeds, n_jobs=1, progress=False):
         import optuna
 
-        # Silence Optuna INFO logs in worker processes unless explicitly requested.
-        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        # Silence Optuna logs in worker processes.
+        optuna.logging.set_verbosity(optuna.logging.CRITICAL)
         optuna.logging.disable_default_handler()
 
         def _make_sampler(seed):
