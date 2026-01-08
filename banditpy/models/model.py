@@ -30,13 +30,20 @@ def _get_slurm_cpus(default=1):
 
 class DecisionModel:
     def __init__(self, task: Bandit2Arm, policy: BasePolicy, reset_mode="session"):
+        # Allow passing either an instance or a policy class; normalize to an instance.
+        if isinstance(policy, type) and issubclass(policy, BasePolicy):
+            policy = policy()
+
+        if not isinstance(policy, BasePolicy):
+            raise TypeError("policy must be a BasePolicy instance or subclass")
+
         self.task = task
         self.policy = policy
 
         self.reset_mode = reset_mode
         self.resets = self._compute_resets(task, reset_mode)
 
-        self.choices = np.asarray(task.choices, int) - 1
+        self.choices = np.asarray(task.choices, int) - 1  # Choices 0/1
         self.rewards = np.asarray(task.rewards, float)
 
         self.nll = None
