@@ -214,20 +214,56 @@ class DecisionModel:
         cls,
         policy,
         reward_schedule,
-        trials_per_block,
-        params,
+        min_trials_per_block,
+        params=None,
+        prob_switch=1.0,
         seed=None,
         metadata=None,
     ):
+        """
+        Simulate a policy on a multi-block 2-armed bandit with optional variable block lengths.
+
+        Args:
+            policy: A `BasePolicy` instance (mutated in-place during simulation).
+            reward_schedule: Sequence of `(p1, p2)` tuples; one per block specifying reward probs.
+            min_trials_per_block: Int or sequence giving the minimum trials to run per block.
+            params: Optional dict of policy parameters (must include `beta`).
+                If None, assumes the policy was already configured via `policy.set_params()`.
+            prob_switch: Float or sequence in (0, 1]; probability of switching after min trials.
+                Example: `min_trials_per_block=100`, `prob_switch=0.02` yields median ~150 trials.
+            seed: RNG seed for reproducibility.
+            metadata: Optional metadata stored on the returned `Bandit2Arm` task.
+
+        Returns:
+            Bandit2Arm: Simulated task with probs, choices, rewards, and block/session ids.
+        """
         rng = np.random.default_rng(seed)
 
-        policy.set_params(params)
+        if params is not None:
+            policy.set_params(params)
+        elif not policy.params:
+            raise ValueError(
+                "params is None and policy has no parameters set; "
+                "call policy.set_params(...) or provide params"
+            )
+
+        if "beta" not in policy.params:
+            raise ValueError("policy parameters must include 'beta'")
+
+        beta = policy.params["beta"]
         policy.reset()
 
-        if isinstance(trials_per_block, int):
-            trials_per_block = [trials_per_block] * len(reward_schedule)
+        if isinstance(min_trials_per_block, int):
+            min_trials_per_block = [min_trials_per_block] * len(reward_schedule)
 
-        assert len(trials_per_block) == len(reward_schedule)
+        if isinstance(prob_switch, (int, float)):
+            prob_switch = [prob_switch] * len(reward_schedule)
+
+        assert len(min_trials_per_block) == len(reward_schedule)
+        assert len(prob_switch) == len(reward_schedule)
+
+        if not all(0 < p <= 1 for p in prob_switch):
+            raise ValueError("prob_switch must be in (0, 1]")
 
         probs_list, choices, rewards = [], [], []
         session_ids, block_ids = [], []
@@ -235,21 +271,28 @@ class DecisionModel:
         session_counter = 1
         block_counter = 1
 
-        for (p1, p2), n_trials in zip(reward_schedule, trials_per_block):
-            block_probs = np.tile([p1, p2], (n_trials, 1))
+        for (p1, p2), n_trials, p_switch in zip(
+            reward_schedule, min_trials_per_block, prob_switch
+        ):
+            trials_in_block = 0
 
-            for t in range(n_trials):
+            while True:
                 logits = policy.logits()
-                c = softmax_sample(logits, beta=params["beta"], rng=rng)
-                r = int(rng.random() < block_probs[t, c])
+                c = softmax_sample(logits, beta=beta, rng=rng)
+                r = int(rng.random() < [p1, p2][c])
 
                 policy.update(c, r)
 
-                probs_list.append(block_probs[t])
+                probs_list.append([p1, p2])
                 choices.append(c + 1)
                 rewards.append(r)
                 session_ids.append(session_counter)
                 block_ids.append(block_counter)
+
+                trials_in_block += 1
+
+                if trials_in_block >= n_trials and rng.random() < p_switch:
+                    break
 
             session_counter += 1
             block_counter += 1
