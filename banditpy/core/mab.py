@@ -147,12 +147,12 @@ class BanditTask(DataManager):
 
     @staticmethod
     def _fix_datetime(datetime):
-        if datetime.ndim == 2:
-            datetime = np.squeeze(datetime)
         if datetime is None:
             return None
-        datetime = np.array(datetime)
-        if np.issubdtype(datetime.dtype, np.number):
+        elif datetime.ndim == 2:
+            datetime = np.squeeze(datetime)
+            datetime = np.array(datetime)
+        elif np.issubdtype(datetime.dtype, np.number):
             datetime = datetime.astype("datetime64[s]")
         return datetime
 
@@ -704,7 +704,7 @@ class Bandit2Arm(BanditTask):
 
         return stats.entropy(choices_prob, base=2, axis=0)
 
-    def get_prob_hist_2d(self, stat="count"):
+    def get_prob_hist2d(self, stat="count"):
         """Get the probability matrix for each session. Calculates a 2D histogram of the reward probabilities.
 
         Returns
@@ -742,13 +742,17 @@ class Bandit2Arm(BanditTask):
 
         return h, bins[:-1] + bin_size / 2
 
-    def get_performance_prob_grid(self, n_last_trials=5):
+    def get_performance_prob_grid(
+        self, n_last_trials=5, performance_metric="optimal_choice"
+    ):
         """Get performance grid based on reward probabilities.
 
         Parameters
         ----------
-        bin_size : float, optional
-            Size of the bins for reward probabilities, by default 0.1
+        n_last_trials : int, optional
+            Number of last trials to consider for performance calculation, by default 5
+        performance_metric : str, optional
+            Metric to use for performance calculation, by default "optimal_choice"
 
         Returns
         -------
@@ -772,10 +776,12 @@ class Bandit2Arm(BanditTask):
 
                 if mask.sum() > 100:
                     task_p1p2 = self._filtered(mask)
-                    perf_p1p2 = task_p1p2.get_optimal_choice_probability()[
-                        -n_last_trials:
-                    ].mean()
-                    perf_mat[i1, i2] = perf_p1p2
+                    if performance_metric == "optimal_choice":
+                        perf_p1p2 = task_p1p2.get_optimal_choice_probability()
+                    if performance_metric == "reward_rate":
+                        perf_p1p2 = task_p1p2.get_reward_probability()
+
+                    perf_mat[i1, i2] = perf_p1p2[-n_last_trials:].mean()
 
         return perf_mat, unique_probs
 
