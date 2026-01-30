@@ -226,8 +226,28 @@ class BanditTask(DataManager):
 
         return self._filtered(mask)
 
-    def filter_by_session_id(self, ids):
-        mask = np.isin(self.session_ids, ids)
+    def filter_by_session_id(self, start=None, stop=None, ids=None):
+        """Filter trials by session id(s).
+
+        Priority: explicit ``ids`` overrides ``start``/``stop`` bounds.
+        """
+
+        session_ids = np.asarray(self.session_ids)
+
+        if ids is not None:
+            target_ids = np.asarray(list(np.atleast_1d(ids)))
+            mask = np.isin(session_ids, target_ids)
+        else:
+            if start is None and stop is None:
+                raise ValueError("Provide start/stop or ids to filter sessions")
+
+            if start is None:
+                start = session_ids.min()
+            if stop is None:
+                stop = session_ids.max()
+
+            mask = (session_ids >= start) & (session_ids <= stop)
+
         return self._filtered(mask)
 
     def filter_by_block_id(self, start=None, stop=None, ids=None):
