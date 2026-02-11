@@ -5,6 +5,7 @@ from scipy.ndimage import gaussian_filter1d
 import pandas as pd
 from numpy.lib.stride_tricks import sliding_window_view
 from scipy import stats
+from scipy.optimize import curve_fit
 
 
 class BanditTask(DataManager):
@@ -210,6 +211,48 @@ class BanditTask(DataManager):
         window_starts = np.clip(window_starts, 0, 1)
         window_starts[0] = 1
         return window_starts.astype(bool)
+
+    def trial_slice(self, start, stop):
+        """
+        Slice trials [start:stop] within each session.
+
+        Parameters
+        ----------
+        start : int
+            Start trial index within session (0-based, inclusive)
+        stop : int
+            Stop trial index within session (0-based, exclusive)
+
+        Returns
+        -------
+        BanditTask
+            New task containing sliced trials.
+
+        Raises
+        ------
+        ValueError
+            If any session has fewer than `stop` trials.
+        """
+
+        if start < 0 or stop <= start:
+            raise ValueError("Invalid slice bounds: require 0 <= start < stop")
+
+        # Check session lengths
+        too_short = self.sessions[self.ntrials_session < stop]
+        if len(too_short) > 0:
+            raise ValueError(
+                f"Sessions {too_short.tolist()} have fewer than {stop} trials"
+            )
+
+        # Build mask
+        mask = np.zeros(self.n_trials, dtype=bool)
+
+        for sess in self.sessions:
+            sess_idx = np.where(self.session_ids == sess)[0]
+            slice_idx = sess_idx[start:stop]
+            mask[slice_idx] = True
+
+        return self._filtered(mask)
 
     def filter_by_trials(self, min_trials=100, clip_max=None):
         valid_sessions = self.sessions[self.ntrials_session >= min_trials]
@@ -498,13 +541,13 @@ class Bandit2Arm(BanditTask):
         assert self.n_ports == 2, "Only implemented for 2AB task"
         return np.where(self.choices == 2, 1, 0)  # Port 1: 0 and Port 2: 1
 
-    def get_port_bias(self):
+    def get_port_bias(self, kind="linear"):
         """Get the port bias as a function of delta probability.
 
         Returns
         -------
-        linfit : LinregressResult
-            The result of linear regression between delta probability and choice bias.
+        fitparams : LinregressResult or np.ndarray
+            The result of linear regression or logistic fit between delta probability and choice bias.
         unique_prob_diff : np.ndarray
             Unique delta probabilities.
         choice_diff : np.ndarray
@@ -522,9 +565,52 @@ class Bandit2Arm(BanditTask):
         )
         good_idx = ~np.isnan(choice_diff)
 
-        linfit = stats.linregress(unique_prob_diff[good_idx], choice_diff[good_idx])
+        if kind == "linear":
+            fitparams = stats.linregress(
+                unique_prob_diff[good_idx], choice_diff[good_idx]
+            )
+            y_est = fitparams.slope * unique_prob_diff + fitparams.intercept
+        elif kind == "logistic":
 
-        return linfit, unique_prob_diff, choice_diff
+            def logistic(x, ymin, ymax, k, x0):
+                return ymin + (ymax - ymin) / (1 + np.exp(-k * (x - x0)))
+
+            p0 = [
+                np.min(choice_diff),
+                np.max(choice_diff),
+                1.0,
+                np.median(unique_prob_diff),
+            ]
+            popt, _ = curve_fit(
+                logistic,
+                unique_prob_diff[good_idx],
+                choice_diff[good_idx],
+                p0=p0,
+                maxfev=10000,
+                method="trf",
+            )
+
+            fitparams = popt  # L, x0, k
+            y_est = logistic(unique_prob_diff, *popt)
+        elif kind == "tanh":
+
+            def tanh_model(x, A, k, x0):
+                return A * np.tanh(k * (x - x0))
+
+            p0 = [np.max(np.abs(choice_diff)), 1.0, np.median(unique_prob_diff)]
+            fitparams, _ = curve_fit(
+                tanh_model,
+                unique_prob_diff[good_idx],
+                choice_diff[good_idx],
+                p0=p0,
+                maxfev=10000,
+                method="trf",
+            )
+            y_est = tanh_model(unique_prob_diff, *fitparams)
+        else:
+            raise ValueError("kind must be 'linear', 'logistic' or 'tanh'")
+
+        return fitparams, unique_prob_diff, choice_diff, y_est
 
     @staticmethod
     def from_csv(
@@ -584,9 +670,6 @@ class Bandit2Arm(BanditTask):
             datetime=None if datetime is None else df[datetime].to_numpy(),
             metadata=None,
         )
-
-    def trim_sessions(self, trial_start, trial_stop):
-        pass
 
     def filter_by_probs(self, probs):
         """Keep only sessions with probabilities that match the given probabilities.
