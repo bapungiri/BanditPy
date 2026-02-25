@@ -2,6 +2,16 @@ import numpy as np
 from banditpy.models.policy.base import BasePolicy, ParameterSpec
 
 
+def _softmax(x: np.ndarray, beta: float) -> np.ndarray:
+    z = beta * x
+    z -= z.max()
+    e = np.exp(z)
+    s = e.sum()
+    if s <= 0:
+        return np.full_like(x, 1.0 / len(x))
+    return e / s
+
+
 class Qlearn2Arm(BasePolicy):
     """
     Vanilla 2-arm Q-learning with counterfactual updates.
@@ -95,3 +105,90 @@ class QlearnH2Arm(BasePolicy):
         np.maximum(self.q, 0.0, out=self.q)
 
         self.h += p["alpha_h"] * (choice - self.h)
+
+
+class HierarchicalQ2Arm(BasePolicy):
+    """
+    Two-option hierarchical RL for a 2-armed bandit.
+
+    A meta-controller mixes two option policies. Each option holds its own
+    action values; the meta-controller maintains option values. Action
+    probabilities are a mixture of option policies. Updates use soft
+    responsibilities over options given the chosen action.
+    """
+
+    parameters = [
+        ParameterSpec("alpha_q", (0.0, 1.0), description="LR for option Q-values"),
+        ParameterSpec(
+            "alpha_meta", (0.0, 1.0), description="LR for meta option values"
+        ),
+        ParameterSpec("tau", (0.5, 1.0), default=1.0, description="Forgetting factor"),
+        ParameterSpec(
+            "q_init", (0.0, 1.0), default=0.5, description="Initial action value"
+        ),
+        ParameterSpec(
+            "m_init", (-1.0, 1.0), default=0.0, description="Initial meta value"
+        ),
+        ParameterSpec(
+            "beta_meta", (0.1, 20.0), description="Inverse temp over options"
+        ),
+        ParameterSpec(
+            "beta_option", (0.1, 20.0), description="Inverse temp within options"
+        ),
+        ParameterSpec("beta", (0.1, 20.0), description="Inverse temperature"),
+    ]
+
+    def __init__(self, n_options: int = 2):
+        super().__init__()
+        self.n_options = n_options
+
+    def reset(self):
+        q0 = self.params.get("q_init", 0.5)
+        m0 = self.params.get("m_init", 0.0)
+        self.q = np.full((self.n_options, 2), q0, dtype=float)
+        self.m = np.full(self.n_options, m0, dtype=float)
+
+    def forget(self):
+        tau = self.params["tau"]
+        q0 = self.params.get("q_init", 0.5)
+        m0 = self.params.get("m_init", 0.0)
+        self.q = q0 + tau * (self.q - q0)
+        self.m = m0 + tau * (self.m - m0)
+
+    def logits(self):
+        p_meta = _softmax(self.m, self.params["beta_meta"])
+
+        beta_opt = self.params["beta_option"]
+        opt_probs = np.vstack(
+            [_softmax(self.q[i], beta_opt) for i in range(self.n_options)]
+        )
+
+        p_action = p_meta @ opt_probs
+        p_action = np.clip(p_action, 1e-9, 1.0)
+        return np.log(p_action)
+
+    def update(self, choice, reward):
+        p_meta = _softmax(self.m, self.params["beta_meta"])
+        beta_opt = self.params["beta_option"]
+        opt_probs = np.vstack(
+            [_softmax(self.q[i], beta_opt) for i in range(self.n_options)]
+        )
+
+        resp = p_meta * opt_probs[:, choice]
+        resp_sum = resp.sum()
+        if resp_sum <= 0:
+            resp = np.full(self.n_options, 1.0 / self.n_options)
+        else:
+            resp /= resp_sum
+
+        aq = self.params["alpha_q"]
+        am = self.params["alpha_meta"]
+
+        for k in range(self.n_options):
+            pe = reward - self.q[k, choice]
+            self.q[k, choice] += aq * resp[k] * pe
+            np.minimum(self.q[k], 1.0, out=self.q[k])
+            np.maximum(self.q[k], 0.0, out=self.q[k])
+
+            m_pe = reward - self.m[k]
+            self.m[k] += am * resp[k] * m_pe
