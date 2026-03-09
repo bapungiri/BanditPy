@@ -254,6 +254,43 @@ class BanditTask(DataManager):
 
         return self._filtered(mask)
 
+    def filter_by_datetime(self, start=None, stop=None):
+        """Filter trials by datetime range.
+
+        Parameters
+        ----------
+        start : str or np.datetime64, optional
+            Start datetime (inclusive). Can be a string parseable by np.datetime64 or a np.datetime64 object.
+        stop : str or np.datetime64, optional
+            Stop datetime (inclusive). Can be a string parseable by np.datetime64 or a np.datetime64 object.
+
+        Returns
+        -------
+        BanditTask
+            New task containing only trials within the specified datetime range.
+
+        Raises
+        ------
+        ValueError
+            If datetime is not set or if start/stop are invalid.
+        """
+        if self.datetime is None:
+            raise ValueError("datetime must be set to filter by datetime")
+
+        dt = self.datetime.astype("datetime64[s]")
+
+        if start is not None:
+            start_dt = np.datetime64(start)
+            dt_mask = dt >= start_dt
+        else:
+            dt_mask = np.ones_like(dt, dtype=bool)
+
+        if stop is not None:
+            stop_dt = np.datetime64(stop)
+            dt_mask &= dt <= stop_dt
+
+        return self._filtered(dt_mask)
+
     def filter_by_trials(self, min_trials=100, clip_max=None):
         valid_sessions = self.sessions[self.ntrials_session >= min_trials]
         mask = np.isin(self.session_ids, valid_sessions)
@@ -712,15 +749,15 @@ class Bandit2Arm(BanditTask):
             delta_max = 1
 
         # Calculate the absolute difference between probabilities of the two ports
-        prob_diff = np.abs(np.diff(self.probs, axis=1).flatten())
+        prob_diff = np.abs(np.diff(self.probs, axis=1).flatten().round(2))
 
         # Identify sessions where the probability difference exceeds the threshold
         delta_bool = (prob_diff >= delta_min) & (prob_diff <= delta_max)
-        valid_sessions = np.unique(self.session_ids[delta_bool])
+        # valid_sessions = np.unique(self.session_ids[delta_bool])
 
-        return self.filter_by_session_id(valid_sessions)
+        return self._filtered(delta_bool)
 
-    def get_optimal_choice_probability(self, bin_size=None, as_df=False):
+    def get_optimal_choice_probability(self, bin_size=None):
         """Get probability of choosing high arm on two armed bandit task
 
         Parameters
