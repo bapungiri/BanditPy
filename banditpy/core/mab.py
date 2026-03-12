@@ -150,12 +150,30 @@ class BanditTask(DataManager):
     def _fix_datetime(datetime):
         if datetime is None:
             return None
-        elif datetime.ndim == 2:
-            datetime = np.squeeze(datetime)
-            datetime = np.array(datetime)
-        elif np.issubdtype(datetime.dtype, np.number):
-            datetime = datetime.astype("datetime64[s]")
-        return datetime
+
+        dt = np.asarray(datetime)
+
+        # Normalize shape to 1D
+        dt = np.squeeze(dt)
+        if dt.ndim == 0:
+            dt = dt.reshape(1)
+        if dt.ndim > 1:
+            raise ValueError("datetime must be 1D or squeezable to 1D")
+
+        # Already datetime-like numpy array
+        if np.issubdtype(dt.dtype, np.datetime64):
+            return dt.astype("datetime64[s]")
+
+        # Numeric input: interpreted as unix epoch seconds
+        if np.issubdtype(dt.dtype, np.number):
+            return dt.astype("datetime64[s]")
+
+        # String/object input: parse via pandas
+        parsed = pd.to_datetime(dt, errors="coerce")
+        if np.any(pd.isna(parsed)):
+            raise ValueError("datetime contains unparseable values")
+
+        return np.asarray(parsed.to_numpy()).astype("datetime64[s]")
 
     @staticmethod
     def _fix_session_ids(session_ids):
