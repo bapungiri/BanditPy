@@ -101,7 +101,14 @@ class DecisionModel:
 
     # -------------------- NLL --------------------
 
-    def _nll(self, theta):
+    def _nll(
+        self,
+        theta,
+        best_nll=None,
+        warmup_trials=80,
+        check_every=25,
+        slack=0.02,
+    ):
         names = self.policy.param_names()
         params = dict(zip(names, theta))
 
@@ -112,8 +119,18 @@ class DecisionModel:
 
         beta = params["beta"]
         nll = 0.0
+        n_trials = len(self.choices)
 
-        for c, r, reset in zip(self.choices, self.rewards, self.resets):
+        do_early_stop = (
+            best_nll is not None
+            and np.isfinite(best_nll)
+            and check_every is not None
+            and check_every > 0
+        )
+
+        for t, (c, r, reset) in enumerate(
+            zip(self.choices, self.rewards, self.resets), start=1
+        ):
             if reset:
                 self.policy.reset()
             else:
@@ -123,11 +140,27 @@ class DecisionModel:
             nll -= softmax_loglik(logits, c, beta)
             self.policy.update(c, r)
 
+            # Cumulative NLL is monotonic, so this is a safe pruning criterion.
+            if do_early_stop and t >= warmup_trials and (t % check_every == 0):
+                if nll > best_nll * (1.0 + slack):
+                    return nll
+
         return nll
 
     # -------------------- FIT --------------------
 
-    def fit(self, n_starts=10, seed=None, progress=False, n_jobs=None, optimizer=None):
+    def fit(
+        self,
+        n_starts=10,
+        seed=None,
+        progress=False,
+        n_jobs=None,
+        optimizer=None,
+        early_stop=False,
+        es_warmup_trials=3000,  # roughly 10% of total trials
+        es_check_every=250,  # check every 250 trials after warmup
+        es_slack=0.01,  # Keep if within 1% of best NLL seen so far
+    ):
         rng = np.random.default_rng(seed)
 
         if n_jobs is None:
@@ -144,8 +177,26 @@ class DecisionModel:
 
         opt = resolve_optimizer(optimizer)
 
+        if early_stop:
+            best_seen = [np.inf]
+
+            def objective(theta):
+                val = self._nll(
+                    theta,
+                    best_nll=best_seen[0],
+                    warmup_trials=es_warmup_trials,
+                    check_every=es_check_every,
+                    slack=es_slack,
+                )
+                if np.isfinite(val) and val < best_seen[0]:
+                    best_seen[0] = val
+                return val
+
+        else:
+            objective = self._nll
+
         best_fun, best_x, fvals = opt.fit(
-            objective=self._nll,
+            objective=objective,
             bounds=bounds,
             seeds=seeds,
             n_jobs=n_jobs,
