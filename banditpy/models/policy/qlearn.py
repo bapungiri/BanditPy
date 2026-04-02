@@ -29,7 +29,7 @@ class Qlearn2Arm(BasePolicy):
             "alpha_u", (0.0, 1.0), description="Learning rate for unchosen option"
         ),
         ParameterSpec(
-            "beta", (0.1, 20.0), description="Inverse temperature for softmax"
+            "beta", (0.1, 10.0), description="Inverse temperature for softmax"
         ),
     ]
 
@@ -41,6 +41,57 @@ class Qlearn2Arm(BasePolicy):
 
     def logits(self):
         return self.q.copy()
+
+    def update(self, choice, reward):
+        a_c = self.params["alpha_c"]
+        a_u = self.params["alpha_u"]
+
+        other = 1 - choice
+        pe = reward - self.q[choice]
+
+        self.q[choice] += a_c * pe
+        self.q[other] += a_u * pe
+
+        self.q[:] = np.clip(self.q, 0.0, 1.0)
+
+
+class QlearnBias2Arm(BasePolicy):
+    """
+    2-arm Q-learning with counterfactual updates and a port bias term.
+
+    Update rule:
+    Q[choice] += alpha_c * (reward - Q[choice])
+    Q[unchosen] += alpha_u * (reward - Q[choice])
+
+    Choice logits:
+    logit[0] = Q[0] + bias
+    logit[1] = Q[1] - bias
+    """
+
+    parameters = [
+        ParameterSpec(
+            "alpha_c", (0.0, 1.0), description="Learning rate for chosen option"
+        ),
+        ParameterSpec(
+            "alpha_u", (0.0, 1.0), description="Learning rate for unchosen option"
+        ),
+        ParameterSpec(
+            "beta", (0.1, 10.0), description="Inverse temperature for softmax"
+        ),
+        ParameterSpec(
+            "bias", (-2.0, 2.0), default=0.0, description="Bias toward port 0 vs port 1"
+        ),
+    ]
+
+    def reset(self):
+        self.q = np.full(2, 0.5)
+
+    def forget(self):
+        pass
+
+    def logits(self):
+        b = self.params["bias"]
+        return np.array([self.q[0] + b, self.q[1] - b])
 
     def update(self, choice, reward):
         a_c = self.params["alpha_c"]
@@ -107,7 +158,7 @@ class QlearnH2Arm(BasePolicy):
         self.h += p["alpha_h"] * (choice - self.h)
 
 
-class HierarchicalQ2Arm(BasePolicy):
+class QlearnHierarchical2Arm(BasePolicy):
     """
     Two-option hierarchical RL for a 2-armed bandit.
 
@@ -130,12 +181,12 @@ class HierarchicalQ2Arm(BasePolicy):
             "m_init", (-1.0, 1.0), default=0.0, description="Initial meta value"
         ),
         ParameterSpec(
-            "beta_meta", (0.1, 20.0), description="Inverse temp over options"
+            "beta_meta", (0.1, 10.0), description="Inverse temp over options"
         ),
         ParameterSpec(
-            "beta_option", (0.1, 20.0), description="Inverse temp within options"
+            "beta_option", (0.1, 10.0), description="Inverse temp within options"
         ),
-        ParameterSpec("beta", (0.1, 20.0), description="Inverse temperature"),
+        ParameterSpec("beta", (0.1, 10.0), description="Inverse temperature"),
     ]
 
     def __init__(self, n_options: int = 2):
