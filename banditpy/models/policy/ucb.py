@@ -84,6 +84,7 @@ class BayesianUCB(BasePolicy):
     ]
 
     def __init__(self, prior_strength=2.0):
+        super().__init__()
         self.prior_strength = prior_strength
 
     def reset(self):
@@ -126,6 +127,7 @@ class RLBayesianUCB(BasePolicy):
     ]
 
     def __init__(self, prior_strength=2.0):
+        super().__init__()
         self.prior_strength = prior_strength
 
     def reset(self):
