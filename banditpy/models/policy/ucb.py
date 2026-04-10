@@ -7,7 +7,6 @@ class EmpiricalUCB(BasePolicy):
         ParameterSpec("explore", (1e-3, 10.0)),
         ParameterSpec("tau", (0.5, 0.999)),
         ParameterSpec("q_init", (0.0, 1.0), default=0.5),
-        ParameterSpec("beta", (0.1, 10.0)),
     ]
 
     def reset(self):
@@ -40,7 +39,6 @@ class RLUCB(BasePolicy):
         ParameterSpec("explore", (1e-3, 10.0)),
         ParameterSpec("tau", (0.5, 0.999)),
         ParameterSpec("q_init", (0.0, 1.0), default=0.5),
-        ParameterSpec("beta", (0.1, 10.0)),
         ParameterSpec("lr_chosen", (-1.0, 1.0)),
         ParameterSpec("lr_unchosen", (-1.0, 1.0)),
     ]
@@ -80,7 +78,6 @@ class BayesianUCB(BasePolicy):
         ParameterSpec("explore", (1e-3, 10.0)),
         ParameterSpec("tau", (0.5, 0.999)),
         ParameterSpec("q_init", (0.0, 1.0), default=0.5),
-        ParameterSpec("beta", (0.1, 10.0)),
     ]
 
     def __init__(self, prior_strength=2.0):
@@ -121,7 +118,6 @@ class RLBayesianUCB(BasePolicy):
         ParameterSpec("explore", (1e-3, 10.0)),
         ParameterSpec("tau", (0.5, 0.999)),
         ParameterSpec("q_init", (0.0, 1.0), default=0.5),
-        ParameterSpec("beta", (0.1, 10.0)),
         ParameterSpec("lr_chosen", (-1.0, 1.0)),
         ParameterSpec("lr_unchosen", (-1.0, 1.0)),
     ]

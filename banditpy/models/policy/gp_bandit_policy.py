@@ -15,8 +15,11 @@ class GP2Arm(BasePolicy):
         ParameterSpec("length_scale", (0.01, 10.0), description="RBF length scale"),
         ParameterSpec("signal_var", (1e-4, 10.0), description="Kernel variance"),
         ParameterSpec("noise_var", (1e-6, 1.0), description="Observation noise"),
-        ParameterSpec("beta", (0.0, 10.0), description="UCB exploration weight"),
     ]
+
+    def __init__(self):
+        super().__init__()
+        self.bounds["beta"] = (0.0, 10.0)
 
     def reset(self):
         self._xs = [[], []]
