@@ -388,6 +388,23 @@ class BanditTask(DataManager):
 
         return self._filtered(mask)
 
+    def filter_by_expert_status(self, n_days=40, min_days=60):
+        """Filter trials by expert status based on datetime.
+        - Exclude the first `n_days` of data to focus on expert behavior.
+        """
+
+        start_date = self.datetime[0]
+        stop_date = self.datetime[-1]
+        total_days = pd.Timedelta(stop_date - start_date).days
+
+        if total_days > min_days:
+            return self.filter_by_datetime(start=start_date + pd.Timedelta(days=n_days))
+        else:
+            print(
+                f"Total days ({total_days}) less than min_days ({min_days}), not filtering by expert status."
+            )
+            return self
+
     def get_block_start_mask(self, start=None, stop=None, ids=None):
         """
         Boolean mask marking the first trial of specified blocks.
