@@ -388,22 +388,39 @@ class BanditTask(DataManager):
 
         return self._filtered(mask)
 
-    def filter_by_expert_status(self, n_days=40, min_days=60):
-        """Filter trials by expert status based on datetime.
-        - Exclude the first `n_days` of data to focus on expert behavior.
+    def filter_by_days(self, start: int = None, stop: int = None):
+        """Filter by day offset from the first trial's date.
+
+        Parameters
+        ----------
+        start : int, optional
+            Skip the first `start` days (inclusive offset from day 0).
+        stop : int, optional
+            Exclude trials after `stop` days from the first trial.
+
+        Returns
+        -------
+        BanditTask
+            Filtered task containing only trials within the specified day range.
         """
 
-        start_date = self.datetime[0]
-        stop_date = self.datetime[-1]
-        total_days = pd.Timedelta(stop_date - start_date).days
+        if self.datetime is None:
+            raise ValueError("datetime is not set, cannot filter by days.")
 
-        if total_days > min_days:
-            return self.filter_by_datetime(start=start_date + pd.Timedelta(days=n_days))
-        else:
-            print(
-                f"Total days ({total_days}) less than min_days ({min_days}), not filtering by expert status."
-            )
-            return self
+        first_date = self.datetime[0]
+        total_days = (self.datetime[-1] - first_date) / np.timedelta64(1, "D")
+
+        if start is not None and start > total_days:
+            raise ValueError(f"start ({start}) exceeds total days ({total_days:.0f}).")
+        if stop is not None and stop > total_days:
+            raise ValueError(f"stop ({stop}) exceeds total days ({total_days:.0f}).")
+        if start is not None and stop is not None and stop <= start:
+            raise ValueError(f"stop ({stop}) must be greater than start ({start}).")
+
+        start_dt = first_date + pd.Timedelta(days=start) if start is not None else None
+        stop_dt = first_date + pd.Timedelta(days=stop) if stop is not None else None
+
+        return self.filter_by_datetime(start=start_dt, stop=stop_dt)
 
     def get_block_start_mask(self, start=None, stop=None, ids=None):
         """

@@ -165,7 +165,7 @@ class QlearnHierarchical2Arm(BasePolicy):
     responsibilities over options given the chosen action.
     """
 
-    _disable_common = ["beta"]
+    # _disable_common = [""]
 
     parameters = [
         ParameterSpec("alpha_q", (0.0, 1.0), description="LR for option Q-values"),

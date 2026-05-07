@@ -91,7 +91,7 @@ class BasePolicy:
             "epsilon",
             (0.0, 0.3),
             default=0.0,
-            active=False,
+            active=False,  # Disable by default, activate to fit lapse rate if desired
             description="Lapse rate (probability of random choice)",
         ),
     ]

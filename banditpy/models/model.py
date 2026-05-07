@@ -158,6 +158,27 @@ class DecisionModel:
 
         return nll
 
+    def get_trial_nll(self):
+        """Return per-trial negative log-likelihood."""
+        self.policy.set_params(self.params)
+        self.policy.reset()
+
+        beta = self.params["beta"]
+        epsilon = self.params.get("epsilon", 0.0)
+        trial_nlls = np.zeros(len(self.choices))
+
+        for t, (c, r, reset) in enumerate(zip(self.choices, self.rewards, self.resets)):
+            if reset:
+                self.policy.reset()
+            else:
+                self.policy.forget()
+
+            logits = self.policy.logits()
+            trial_nlls[t] = -softmax_loglik(logits, c, beta, epsilon)
+            self.policy.update(c, r)
+
+        return trial_nlls
+
     # -------------------- FIT --------------------
 
     def fit(
