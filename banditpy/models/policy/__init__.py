@@ -1,4 +1,12 @@
 from .base import BasePolicy, ParameterSpec
+from .beta_schedule import (
+    BetaSchedule,
+    StaticBeta,
+    ExponentialBeta,
+    LinearBeta,
+    PowerLawBeta,
+    NoBeta,
+)
 from .ucb import EmpiricalUCB, RLUCB, BayesianUCB, RLBayesianUCB
 from .qlearn import (
     Qlearn2Arm,

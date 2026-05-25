@@ -15,11 +15,13 @@ class GP2Arm(BasePolicy):
         ParameterSpec("length_scale", (0.01, 10.0), description="RBF length scale"),
         ParameterSpec("signal_var", (1e-4, 10.0), description="Kernel variance"),
         ParameterSpec("noise_var", (1e-6, 1.0), description="Observation noise"),
+        ParameterSpec(
+            "explore", (0.0, 10.0), description="UCB exploration coefficient"
+        ),
     ]
 
-    def __init__(self):
-        super().__init__()
-        self.bounds["beta"] = (0.0, 10.0)
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
 
     def reset(self):
         self._xs = [[], []]
@@ -45,7 +47,7 @@ class GP2Arm(BasePolicy):
 
     def _ucb(self, arm, x):
         mean, var = self._predict(arm, np.array([x], dtype=float))
-        return float(mean[0] + self.params["beta"] * np.sqrt(max(var[0], 0.0)))
+        return float(mean[0] + self.params["explore"] * np.sqrt(max(var[0], 0.0)))
 
     def _predict(self, arm, x_star):
         xs = np.array(self._xs[arm], dtype=float)

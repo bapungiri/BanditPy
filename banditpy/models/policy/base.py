@@ -28,7 +28,7 @@ class BoundsRegistry:
 
     Examples
     --------
-    policy.bounds["beta"] = (0.1, 20)
+    policy.bounds["alpha_c"] = (0.0, 0.5)   # tighten learning-rate search range
     policy.bounds.enable("tau")
     policy.bounds.disable("lr_unchosen")
     """
@@ -67,11 +67,12 @@ class BoundsRegistry:
 
 class BasePolicy:
     """
-    Subclasses define `parameters = [ParameterSpec(...), ...]`.
+    Subclasses define ``parameters = [ParameterSpec(...), ...]``.
 
-    Common decision-stage parameters (``beta``, ``epsilon``) are defined in
-    ``common_parameters`` and merged automatically so every policy inherits
-    them without duplication.
+    Each policy owns its ``beta_schedule`` (a ``BetaSchedule`` instance that
+    controls the softmax inverse temperature used by ``DecisionModel``). The
+    default is ``StaticBeta()``; override via the ``beta_schedule`` constructor
+    argument or by setting ``default_beta_schedule`` as a class variable.
 
     Lifecycle:
         __init__()  → reset()  (policy starts in a valid state)
@@ -81,25 +82,13 @@ class BasePolicy:
         update()    → apply learning update
     """
 
-    common_parameters: List[ParameterSpec] = [
-        ParameterSpec(
-            "beta",
-            (0.1, 10.0),
-            description="Inverse temperature for softmax",
-        ),
-        ParameterSpec(
-            "epsilon",
-            (0.0, 0.3),
-            default=0.0,
-            active=False,  # Disable by default, activate to fit lapse rate if desired
-            description="Lapse rate (probability of random choice)",
-        ),
-    ]
+    common_parameters: List[ParameterSpec] = []
 
     parameters: List[ParameterSpec] = []
     _disable_common: List[str] = []
+    default_beta_schedule = None  # BetaSchedule subclass; None → StaticBeta
 
-    def __init__(self):
+    def __init__(self, beta_schedule=None, **kwargs):
         all_params = self.parameters + self.common_parameters
         self._param_specs: Dict[str, ParameterSpec] = {
             p.name: p.copy() for p in all_params
@@ -110,7 +99,7 @@ class BasePolicy:
             spec = self._param_specs[name]
             spec.active = False
             if spec.default is None:
-                spec.default = 1.0 if name == "beta" else 0.0
+                spec.default = 0.0
 
         # Runtime parameter values after fit() or set_params()
         self.params: Dict[str, float] = {}
@@ -118,16 +107,28 @@ class BasePolicy:
         # Dict-style bounds API
         self.bounds = BoundsRegistry(self._param_specs)
 
+        # Resolve beta_schedule: explicit arg > subclass default > StaticBeta.
+        # StaticBeta is imported lazily to avoid a circular import
+        # (beta_schedule.py already imports from base.py).
+        if beta_schedule is None:
+            from .beta_schedule import StaticBeta  # noqa: PLC0415
+
+            beta_schedule = (self.default_beta_schedule or StaticBeta)()
+        self.beta_schedule = beta_schedule
+
     # ---------------- Parameter API ----------------
 
     def param_names(self):
         return list(self._param_specs.keys())
 
     def active_parameter_names(self):
-        return [k for k, p in self._param_specs.items() if p.active]
+        own = [k for k, p in self._param_specs.items() if p.active]
+        return own + self.beta_schedule.active_parameter_names()
 
     def get_bounds(self):
-        return self.bounds.to_dict()
+        d = self.bounds.to_dict()
+        d.update(self.beta_schedule.get_bounds())
+        return d
 
     def set_bounds(self, **kwargs):
         for k, v in kwargs.items():
@@ -136,61 +137,98 @@ class BasePolicy:
             self._param_specs[k].bounds = tuple(v)
 
     def set_params(self, params: Dict[str, float]):
+        beta_names = set(self.beta_schedule.parameter_specs())
+        sched_params = {}
         for k, v in params.items():
-            if k not in self._param_specs:
+            if k in beta_names:
+                sched_params[k] = v
+            elif k in self._param_specs:
+                self.params[k] = float(v)
+            else:
                 raise ValueError(f"Unknown parameter '{k}'")
-            self.params[k] = float(v)
+        if sched_params:
+            self.beta_schedule.set_params(sched_params)
 
     def get_param_defaults(self):
         return {k: p.default for k, p in self._param_specs.items()}
 
     def parameter_specs(self):
-        return self._param_specs
+        combined = dict(self._param_specs)
+        combined.update(self.beta_schedule.parameter_specs())
+        return combined
 
     def describe(self, as_markdown: bool = False):
         """
         Print (and optionally return) a table of parameter metadata.
+
+        Shows policy parameters and beta schedule parameters in separate sections.
 
         Parameters
         ----------
         as_markdown : bool, optional
             If True, returns a Markdown table string instead of printing.
         """
-
-        specs = self._param_specs.values()
         headers = ["Parameter", "Bounds", "Default", "Active", "Description"]
 
-        rows = []
-        for p in specs:
-            default_str = "—" if p.default is None else f"{p.default}"
-            rows.append(
-                [
-                    p.name,
-                    f"{p.bounds}",
-                    default_str,
-                    "True" if p.active else "False",
-                    p.description or "",
-                ]
-            )
+        def _make_rows(specs):
+            rows = []
+            for p in specs.values():
+                default_str = "—" if p.default is None else f"{p.default}"
+                rows.append(
+                    [
+                        p.name,
+                        f"{p.bounds}",
+                        default_str,
+                        "True" if p.active else "False",
+                        p.description or "",
+                    ]
+                )
+            return rows
 
-        # ---- Console table ----
+        sched_specs = self.beta_schedule.parameter_specs()
+        sched_name = self.beta_schedule.__class__.__name__
+
         if not as_markdown:
-            print(
+            col_hdr = (
                 f"{headers[0]:<14}{headers[1]:<18}{headers[2]:<8}"
                 f"{headers[3]:<8}{headers[4]}"
             )
-            print("-" * 90)
-            for r in rows:
+            sep = "-" * 90
+            print("Policy parameters")
+            print(sep)
+            print(col_hdr)
+            print(sep)
+            for r in _make_rows(self._param_specs):
                 print(f"{r[0]:<14}{r[1]:<18}{r[2]:<8}{r[3]:<8}{r[4]}")
+            print(f"\nBeta schedule ({sched_name})")
+            print(sep)
+            if sched_specs:
+                print(col_hdr)
+                print(sep)
+                for r in _make_rows(sched_specs):
+                    print(f"{r[0]:<14}{r[1]:<18}{r[2]:<8}{r[3]:<8}{r[4]}")
+            else:
+                print("  (no parameters)")
             return
 
         # ---- Markdown export ----
-        md = [
+        md = ["### Policy parameters\n"]
+        md += [
             "| Parameter | Bounds | Default | Active | Description |",
             "|----------:|--------|--------:|:------:|-------------|",
         ]
-        for r in rows:
+        for r in _make_rows(self._param_specs):
             md.append(f"| {r[0]} | `{r[1]}` | {r[2]} | {r[3]} | {r[4]} |")
+        md.append(f"\n### Beta schedule ({sched_name})\n")
+        if sched_specs:
+            md += [
+                "| Parameter | Bounds | Default | Active | Description |",
+                "|----------:|--------|--------:|:------:|-------------|",
+            ]
+            for r in _make_rows(sched_specs):
+                md.append(f"| {r[0]} | `{r[1]}` | {r[2]} | {r[3]} | {r[4]} |")
+        else:
+            md.append("*(no parameters)*")
         return "\n".join(md)
 
     # ---------------- Lifecycle hooks ----------------

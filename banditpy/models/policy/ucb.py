@@ -80,8 +80,8 @@ class BayesianUCB(BasePolicy):
         ParameterSpec("q_init", (0.0, 1.0), default=0.5),
     ]
 
-    def __init__(self, prior_strength=2.0):
-        super().__init__()
+    def __init__(self, prior_strength=2.0, **kwargs):
+        super().__init__(**kwargs)
         self.prior_strength = prior_strength
 
     def reset(self):
@@ -122,8 +122,8 @@ class RLBayesianUCB(BasePolicy):
         ParameterSpec("lr_unchosen", (-1.0, 1.0)),
     ]
 
-    def __init__(self, prior_strength=2.0):
-        super().__init__()
+    def __init__(self, prior_strength=2.0, **kwargs):
+        super().__init__(**kwargs)
         self.prior_strength = prior_strength
 
     def reset(self):

@@ -21,9 +21,8 @@ class StateInference2Arm(BasePolicy):
         ),
     ]
 
-    def __init__(self):
-        super().__init__()
-        self.bounds["beta"] = (0.1, 20.0)
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
 
     def reset(self):
         p0 = np.clip(self.params["b0"], 1e-6, 1 - 1e-6)

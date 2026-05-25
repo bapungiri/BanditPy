@@ -12,11 +12,10 @@ class BaseThompson2Arm(BasePolicy):
     Subclasses differ only in learning-rate structure.
     """
 
-    def __init__(self, n_sim: int = 500, use_analytic: bool = False):
-        super().__init__()
+    def __init__(self, n_sim: int = 500, use_analytic: bool = False, **kwargs):
+        super().__init__(**kwargs)
         self.n_sim = n_sim
         self.use_analytic = use_analytic
-        self.bounds["beta"] = (0.1, 20.0)
 
     # --- State lifecycle ---
 

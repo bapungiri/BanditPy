@@ -1,5 +1,6 @@
 import numpy as np
 from banditpy.models.policy.base import BasePolicy, ParameterSpec
+from .beta_schedule import NoBeta
 
 
 def _softmax(x: np.ndarray, beta: float) -> np.ndarray:
@@ -109,9 +110,8 @@ class QlearnH2Arm(BasePolicy):
         ParameterSpec("scaler", (1, 10.0), description="Perseverance scale"),
     ]
 
-    def __init__(self):
-        super().__init__()
-        self.bounds["beta"] = (0.01, 20.0)
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
 
     def reset(self):
         self.q0 = 0.5
@@ -161,11 +161,15 @@ class QlearnHierarchical2Arm(BasePolicy):
 
     A meta-controller mixes two option policies. Each option holds its own
     action values; the meta-controller maintains option values. Action
-    probabilities are a mixture of option policies. Updates use soft
-    responsibilities over options given the chosen action.
+    probabilities are a mixture of option policies, with ``beta_meta`` and
+    ``beta_option`` controlling exploration at each level. ``logits()``
+    returns log-probabilities, so this policy uses ``NoBeta`` by default.
+    Updates use soft responsibilities over options given the chosen action.
     """
 
     # _disable_common = [""]
+
+    default_beta_schedule = NoBeta
 
     parameters = [
         ParameterSpec("alpha_q", (0.0, 1.0), description="LR for option Q-values"),
@@ -187,8 +191,8 @@ class QlearnHierarchical2Arm(BasePolicy):
         ),
     ]
 
-    def __init__(self, n_options: int = 2):
-        super().__init__()
+    def __init__(self, n_options: int = 2, **kwargs):
+        super().__init__(**kwargs)
         self.n_options = n_options
 
     def reset(self):
@@ -260,7 +264,8 @@ class QlearnWM2Arm(BasePolicy):
     Action probabilities:
         p(a) = (1 - w) * softmax(beta_rl * Q_RL) + w * softmax(beta_wm * Q_WM)
 
-    Common beta is disabled; beta_rl and beta_wm control exploration independently.
+    ``beta_rl`` and ``beta_wm`` are internal parameters; the outer softmax
+    in ``DecisionModel`` should be neutralised by pairing with ``NoBeta()``.
 
     Reference
     ---------
@@ -269,7 +274,7 @@ class QlearnWM2Arm(BasePolicy):
     Journal of Neuroscience, 35(7), 1024-1035.
     """
 
-    _disable_common = ["beta"]
+    default_beta_schedule = NoBeta
 
     parameters = [
         ParameterSpec("alpha_rl", (0.0, 1.0), description="RL learning rate"),
