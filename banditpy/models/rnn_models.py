@@ -1236,9 +1236,7 @@ class BanditModelFreeAgent2Arm:
         return Q
 
     def _update_mflb(self, Q, action, reward, params):
-        (alpha_c, util_c_r0, util_c_r1, alpha_u, util_u_r0, util_u_r1, inv_temp) = (
-            params
-        )
+        alpha_c, util_c_r0, util_c_r1, alpha_u, util_u_r0, util_u_r1, inv_temp = params
         # Copy + unchosen decay/upweight
         if reward == 0:
             Q = alpha_u * Q + util_u_r0
