@@ -1,10 +1,11 @@
-from .base import BasePolicy, ParameterSpec
+from .base import BasePolicy, ParameterGroup, ParameterSpec
 from .beta_schedule import (
     BetaSchedule,
     StaticBeta,
     ExponentialBeta,
     LinearBeta,
     PowerLawBeta,
+    PowerLaw10Beta,
     NoBeta,
 )
 from .ucb import EmpiricalUCB, RLUCB, BayesianUCB, RLBayesianUCB

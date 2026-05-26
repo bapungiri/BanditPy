@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import List
 from scipy.special import betainc, beta as Bfn
 
-from .base import BasePolicy, ParameterSpec
+from .base import BasePolicy, ParameterGroup, ParameterSpec
 
 
 class BaseThompson2Arm(BasePolicy):
@@ -79,13 +79,16 @@ class ThompsonShared2Arm(BaseThompson2Arm):
     Shared learning rates for chosen / unchosen outcomes.
     """
 
-    parameters: List[ParameterSpec] = [
-        ParameterSpec("alpha0", (1e-3, 20.0), description="Prior alpha"),
-        ParameterSpec("beta0", (1e-3, 20.0), description="Prior beta"),
-        ParameterSpec("tau", (0.1, 0.999), description="Decay factor"),
-        ParameterSpec("lr_chosen", (0.0, 1.0), description="LR (chosen arm)"),
-        ParameterSpec("lr_unchosen", (0.0, 1.0), description="LR (unchosen arm)"),
-    ]
+    class Params(ParameterGroup):
+        alpha0 = ParameterSpec("alpha0", (1e-3, 20.0), description="Prior alpha")
+        beta0 = ParameterSpec("beta0", (1e-3, 20.0), description="Prior beta")
+        tau = ParameterSpec("tau", (0.1, 0.999), description="Decay factor")
+        lr_chosen = ParameterSpec(
+            "lr_chosen", (0.0, 1.0), description="LR (chosen arm)"
+        )
+        lr_unchosen = ParameterSpec(
+            "lr_unchosen", (0.0, 1.0), description="LR (unchosen arm)"
+        )
 
     def update(self, choice, reward):
         p = self.params
@@ -108,21 +111,22 @@ class ThompsonSplit2Arm(BaseThompson2Arm):
     Fully independent pos/neg learning rates for both arms.
     """
 
-    parameters: List[ParameterSpec] = [
-        ParameterSpec("alpha0", (1, 20.0), description="Prior alpha"),
-        ParameterSpec("beta0", (1, 20.0), description="Prior beta"),
-        ParameterSpec("tau", (0.1, 0.999), description="Decay factor"),
-        ParameterSpec(
+    class Params(ParameterGroup):
+        alpha0 = ParameterSpec("alpha0", (1, 20.0), description="Prior alpha")
+        beta0 = ParameterSpec("beta0", (1, 20.0), description="Prior beta")
+        tau = ParameterSpec("tau", (0.1, 0.999), description="Decay factor")
+        lr_c_pos = ParameterSpec(
             "lr_c_pos", (0.0, 1.0), description="LR (chosen arm, positive reward)"
-        ),
-        ParameterSpec("lr_c_neg", (0.0, 1.0), description="LR (chosen arm, no reward)"),
-        ParameterSpec(
+        )
+        lr_c_neg = ParameterSpec(
+            "lr_c_neg", (0.0, 1.0), description="LR (chosen arm, no reward)"
+        )
+        lr_u_pos = ParameterSpec(
             "lr_u_pos", (0.0, 1.0), description="LR (unchosen arm, positive reward)"
-        ),
-        ParameterSpec(
+        )
+        lr_u_neg = ParameterSpec(
             "lr_u_neg", (0.0, 1.0), description="LR (unchosen arm, no reward)"
-        ),
-    ]
+        )
 
     def update(self, choice, reward):
         p = self.params

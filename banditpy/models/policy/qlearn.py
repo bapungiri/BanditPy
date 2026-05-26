@@ -1,5 +1,5 @@
 import numpy as np
-from banditpy.models.policy.base import BasePolicy, ParameterSpec
+from banditpy.models.policy.base import BasePolicy, ParameterGroup, ParameterSpec
 from .beta_schedule import NoBeta
 
 
@@ -22,14 +22,13 @@ class Qlearn2Arm(BasePolicy):
     Q[unchosen] += alpha_u * (reward - Q[choice])
     """
 
-    parameters = [
-        ParameterSpec(
+    class Params(ParameterGroup):
+        alpha_c = ParameterSpec(
             "alpha_c", (0.0, 1.0), description="Learning rate for chosen option"
-        ),
-        ParameterSpec(
+        )
+        alpha_u = ParameterSpec(
             "alpha_u", (0.0, 1.0), description="Learning rate for unchosen option"
-        ),
-    ]
+        )
 
     def reset(self):
         self.q = np.full(2, 0.5)
@@ -66,17 +65,16 @@ class QlearnBias2Arm(BasePolicy):
     logit[1] = Q[1] - bias
     """
 
-    parameters = [
-        ParameterSpec(
+    class Params(ParameterGroup):
+        alpha_c = ParameterSpec(
             "alpha_c", (0.0, 1.0), description="Learning rate for chosen option"
-        ),
-        ParameterSpec(
+        )
+        alpha_u = ParameterSpec(
             "alpha_u", (0.0, 1.0), description="Learning rate for unchosen option"
-        ),
-        ParameterSpec(
+        )
+        bias = ParameterSpec(
             "bias", (-2.0, 2.0), default=0.0, description="Bias toward port 0 vs port 1"
-        ),
-    ]
+        )
 
     def reset(self):
         self.q = np.full(2, 0.5)
@@ -103,12 +101,17 @@ class QlearnBias2Arm(BasePolicy):
 
 class QlearnH2Arm(BasePolicy):
 
-    parameters = [
-        ParameterSpec("alpha_c", (-1.0, 1.0), description="Learning rate (chosen)"),
-        ParameterSpec("alpha_u", (-1.0, 1.0), description="Learning rate (unchosen)"),
-        ParameterSpec("alpha_h", (0.0, 1.0), description="Perseverance learning"),
-        ParameterSpec("scaler", (1, 10.0), description="Perseverance scale"),
-    ]
+    class Params(ParameterGroup):
+        alpha_c = ParameterSpec(
+            "alpha_c", (-1.0, 1.0), description="Learning rate (chosen)"
+        )
+        alpha_u = ParameterSpec(
+            "alpha_u", (-1.0, 1.0), description="Learning rate (unchosen)"
+        )
+        alpha_h = ParameterSpec(
+            "alpha_h", (0.0, 1.0), description="Perseverance learning"
+        )
+        scaler = ParameterSpec("scaler", (1, 10.0), description="Perseverance scale")
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -171,25 +174,28 @@ class QlearnHierarchical2Arm(BasePolicy):
 
     default_beta_schedule = NoBeta
 
-    parameters = [
-        ParameterSpec("alpha_q", (0.0, 1.0), description="LR for option Q-values"),
-        ParameterSpec(
+    class Params(ParameterGroup):
+        alpha_q = ParameterSpec(
+            "alpha_q", (0.0, 1.0), description="LR for option Q-values"
+        )
+        alpha_meta = ParameterSpec(
             "alpha_meta", (0.0, 1.0), description="LR for meta option values"
-        ),
-        ParameterSpec("tau", (0.5, 1.0), default=1.0, description="Forgetting factor"),
-        ParameterSpec(
+        )
+        tau = ParameterSpec(
+            "tau", (0.5, 1.0), default=1.0, description="Forgetting factor"
+        )
+        q_init = ParameterSpec(
             "q_init", (0.0, 1.0), default=0.5, description="Initial action value"
-        ),
-        ParameterSpec(
+        )
+        m_init = ParameterSpec(
             "m_init", (-1.0, 1.0), default=0.0, description="Initial meta value"
-        ),
-        ParameterSpec(
+        )
+        beta_meta = ParameterSpec(
             "beta_meta", (0.1, 10.0), description="Inverse temp over options"
-        ),
-        ParameterSpec(
+        )
+        beta_option = ParameterSpec(
             "beta_option", (0.1, 10.0), description="Inverse temp within options"
-        ),
-    ]
+        )
 
     def __init__(self, n_options: int = 2, **kwargs):
         super().__init__(**kwargs)
@@ -276,13 +282,20 @@ class QlearnWM2Arm(BasePolicy):
 
     default_beta_schedule = NoBeta
 
-    parameters = [
-        ParameterSpec("alpha_rl", (0.0, 1.0), description="RL learning rate"),
-        ParameterSpec("beta_rl", (0.1, 20.0), description="RL inverse temperature"),
-        ParameterSpec("beta_wm", (0.1, 20.0), description="WM inverse temperature"),
-        ParameterSpec("decay", (0.0, 1.0), description="Decay rate toward initial Q"),
-        ParameterSpec("w0", (0.0, 1.0), default=0.5, description="Initial WM weight"),
-    ]
+    class Params(ParameterGroup):
+        alpha_rl = ParameterSpec("alpha_rl", (0.0, 1.0), description="RL learning rate")
+        beta_rl = ParameterSpec(
+            "beta_rl", (0.1, 20.0), description="RL inverse temperature"
+        )
+        beta_wm = ParameterSpec(
+            "beta_wm", (0.1, 20.0), description="WM inverse temperature"
+        )
+        decay = ParameterSpec(
+            "decay", (0.0, 1.0), description="Decay rate toward initial Q"
+        )
+        w0 = ParameterSpec(
+            "w0", (0.0, 1.0), default=0.5, description="Initial WM weight"
+        )
 
     def reset(self):
         self.q_rl = np.full(2, 0.5)
