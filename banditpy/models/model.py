@@ -489,11 +489,15 @@ class DecisionModel:
         print(sep)
         specs = self.policy.parameter_specs()
         for name in self.policy.param_names():
-            v = self.params.get(name, float("nan"))
-            b = specs[name].bounds
-            desc = specs[name].description or ""
+            spec = specs[name]
+            if spec.active:
+                v_str = f"{self.params.get(name, float('nan')):>10.4f}"
+            else:
+                v_str = f"{'inactive':>10}"
+            b = spec.bounds
+            desc = spec.description or ""
             bounds_str = f"({b[0]:.4g}, {b[1]:.4g})"
-            print(f"{name:<14} {v:>10.4f}   {bounds_str:<18}{desc}")
+            print(f"{name:<14} {v_str}   {bounds_str:<18}{desc}")
 
         print("\nBeta schedule parameters")
         print(sep)
@@ -502,11 +506,14 @@ class DecisionModel:
             print(header)
             print(sep)
             for name, spec in beta_specs.items():
-                v = self.params.get(name, float("nan"))
+                if spec.active:
+                    v_str = f"{self.params.get(name, float('nan')):>10.4f}"
+                else:
+                    v_str = f"{'inactive':>10}"
                 b = spec.bounds
                 desc = spec.description or ""
                 bounds_str = f"({b[0]:.4g}, {b[1]:.4g})"
-                print(f"{name:<14} {v:>10.4f}   {bounds_str:<18}{desc}")
+                print(f"{name:<14} {v_str}   {bounds_str:<18}{desc}")
         else:
             print(f"  (none \u2014 {self.beta_schedule.__class__.__name__})")
 
