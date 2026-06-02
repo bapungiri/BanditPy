@@ -267,8 +267,8 @@ class BanditTrainer2Arm:
         clip_norm=1.0,
         **prob_kwargs,
     ):
-        print(f"Starting training for {n_sessions} {self.train_type} sessions...")
         reward_probs = self._get_reward_probs(mode, N=n_sessions, **prob_kwargs)
+        print(f"Starting training for {n_sessions} {self.train_type} sessions...")
 
         training_data = []
         reset_idxs = self._reset_idxs(n_sessions)
@@ -284,6 +284,9 @@ class BanditTrainer2Arm:
 
             if session_idx in reset_idxs:
                 lstm_hidden_state = None  # reset hidden state
+            session_start_hidden = (
+                lstm_hidden_state  # save start state for gradient pass
+            )
 
             for _ in range(n_trials):
                 policy_logits_step, _, lstm_hidden_state = self.model(
@@ -324,7 +327,16 @@ class BanditTrainer2Arm:
             G = self._discounted_return(rewards_received)
             x_seq_tensor = torch.stack(input_tensors_for_update).unsqueeze(0)
 
-            policy_logits_seq, value_estimates_seq, _ = self.model(x_seq_tensor)
+            # Detach carried hidden state to prevent backprop through previous sessions
+            if lstm_hidden_state is not None:
+                if isinstance(lstm_hidden_state, tuple):
+                    lstm_hidden_state = tuple(h.detach() for h in lstm_hidden_state)
+                else:
+                    lstm_hidden_state = lstm_hidden_state.detach()
+
+            policy_logits_seq, value_estimates_seq, _ = self.model(
+                x_seq_tensor, session_start_hidden
+            )
             policy_logits_seq = policy_logits_seq.squeeze(0)
             value_estimates_seq = value_estimates_seq.squeeze(0)
 
@@ -385,7 +397,9 @@ class BanditTrainer2Arm:
 
         if not hasattr(self.model, "_is_trained") or not self.model._is_trained:
             try:
-                self.load_model()
+                checkpoint = torch.load(self.model_path, map_location=self.device)
+                self.model.load_state_dict(checkpoint["model_state_dict"])
+                self.model._is_trained = True
             except FileNotFoundError:
                 print(f"Evaluation failed: Model file not found at {self.model_path}.")
                 return pd.DataFrame()
