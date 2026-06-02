@@ -395,8 +395,8 @@ class BanditTrainer2Arm:
         Evaluate the trained model using the same window/block structure as training.
 
         `reward_probs` must be a numpy array of shape (N, 2). Actions are selected
-        greedily (argmax). Returns a DataFrame with session_id, window_id, block_id,
-        block_trial.
+        stochastically by sampling from the softmax policy. Returns a DataFrame with
+        session_id, window_id, block_id, block_trial.
         """
         print("Starting evaluation with fixed weights...")
 
@@ -437,7 +437,8 @@ class BanditTrainer2Arm:
                     )
 
                 prob_step = F.softmax(policy_logits_step.squeeze(0), dim=-1)
-                model_action = torch.argmax(prob_step).item()  # greedy
+                # stochastic
+                model_action = torch.multinomial(prob_step, num_samples=1).item()
                 env_action = model_action + 1
 
                 reward = (
