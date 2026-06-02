@@ -160,56 +160,37 @@ class BanditTrainer2Arm:
         self.entropy_bonus_history = []
         self.training_loss_history = []
 
-    def _get_reward_probs(self, mode, N, low=0, high=1, decimals=1):
+    def _validate_probs(self, reward_probs):
         """
-        Generates reward probabilities for the two arms for a session.
+        Validates and returns the (N, 2) reward probability array.
+        Auto-detects train_type: 'Structured' if most rows sum to ~1, else 'Unstructured'.
         """
-        if isinstance(mode, np.ndarray):
-            if mode.shape == (2,):
-                p_arm1 = np.ones(N) * mode[0]
-                p_arm2 = np.ones(N) * mode[1]
-            elif mode.shape == (N, 2):
-                p_arm1, p_arm2 = mode[:, 0], mode[:, 1]
-
-            self.train_type = "CustomProbabilities"
-
-        elif isinstance(mode, str):
-            match mode:
-                case "Structured" | "Struc" | "S":
-                    p_arm1 = np.round(
-                        np.random.uniform(low, high, size=N), decimals=decimals
-                    )
-                    p_arm2 = np.round(1.0 - p_arm1, decimals=decimals)
-
-                    self.train_type = "Structured"
-
-                case "Unstructured" | "Unstruc" | "U":
-                    p_arm1 = np.round(
-                        np.random.uniform(low, high, size=N), decimals=decimals
-                    )
-                    p_arm2 = np.round(
-                        np.random.uniform(low, high, size=N), decimals=decimals
-                    )
-                    self.train_type = "Unstructured"
-
-        elif isinstance(mode, list):
-            assert (
-                len(mode) == 2
-            ), "Reward probabilities list must have exactly 2 elements."
-            p_arm1 = mode[0] * np.ones(N)
-            p_arm2 = mode[1] * np.ones(N)
-            self.train_type = "CustomProbabilities"
-
-        else:
+        if (
+            not isinstance(reward_probs, np.ndarray)
+            or reward_probs.ndim != 2
+            or reward_probs.shape[1] != 2
+        ):
             raise ValueError(
-                "Invalid mode. Use 'Structured'/'Struc'/'S', 'Unstructured'/'Unstruc'/'U', or a list of probabilities of length 2, or a numpy array of shape (2,) or (N, 2)."
+                "reward_probs must be a numpy array of shape (N, 2). "
+                "Use generate_probs_2arm() to create it."
             )
+        if not (np.all(reward_probs >= 0) and np.all(reward_probs <= 1)):
+            raise ValueError("All reward probabilities must be between 0 and 1.")
+        frac_structured = np.mean(np.isclose(reward_probs.sum(axis=1), 1.0))
+        self.train_type = "Structured" if frac_structured > 0.5 else "Unstructured"
+        return reward_probs
 
-        # Ensure probabilities are valid
-        if ~(np.all(p_arm1 <= 1) and np.all(p_arm2 <= 1)):
-            raise ValueError("Reward probabilities must be between 0 and 1.")
-
-        return np.array([p_arm1, p_arm2]).T  # Index 0 for arm 1, index 1 for arm 2
+    def _window_boundaries(self, n_sessions, n_block_min, n_block_max):
+        """
+        Pre-computes session indices at which the LSTM hidden state resets (window starts).
+        Window lengths are drawn uniformly from [n_block_min, n_block_max].
+        """
+        starts = set()
+        idx = 0
+        while idx < n_sessions:
+            starts.add(idx)
+            idx += np.random.randint(n_block_min, n_block_max + 1)
+        return starts
 
     def _generate_input(self, env_action, reward):
         """
@@ -242,69 +223,77 @@ class BanditTrainer2Arm:
             G.insert(0, R_val)
         return torch.tensor(G, dtype=torch.float32, device=self.device)
 
-    def _reset_idxs(self, n_sessions):
-        """
-        Generates indices at which to reset the LSTM hidden state.
-        Mimics animal training where animals may do 1, 2, or 3 sessions before a break.
-        """
-        reset_freq = np.array([1, 2, 3])  # Every 1, 2, or 3 sessions
-        reset_idxs = np.cumsum(
-            np.random.choice(reset_freq, size=n_sessions // reset_freq.min())
-        )
-        reset_idxs = reset_idxs[reset_idxs < n_sessions]
-        # Always reset at the start of the first session
-        reset_idxs = [0] + reset_idxs.tolist()
-        return reset_idxs
-
     def train(
         self,
-        mode,
-        n_sessions=10000,
-        n_trials=200,
+        reward_probs,
+        min_block_trials=100,
+        p_switch=0.02,
+        max_block_trials=500,
+        n_block_min=4,
+        n_block_max=8,
         return_df=False,
         save_model=False,
         progress_bar=True,
         clip_norm=1.0,
-        **prob_kwargs,
     ):
-        reward_probs = self._get_reward_probs(mode, N=n_sessions, **prob_kwargs)
-        print(f"Starting training for {n_sessions} {self.train_type} sessions...")
+        """
+        Train on a block-structured task matching the animal paradigm.
+
+        `reward_probs` must be a numpy array of shape (N, 2) with reward probabilities
+        for each arm (use generate_probs_2arm to create it). N determines the number of
+        sessions. Window boundaries (LSTM hidden state resets) are sampled uniformly
+        from [n_block_min, n_block_max] sessions apart. Each session runs for at
+        least `min_block_trials` trials, after which there is a `p_switch` probability
+        per trial of ending the session.
+
+        Output DataFrame columns (when return_df=True):
+            session_id  : global 1..N, one per probability combination
+            window_id   : increments at each hidden-state reset
+            block_id    : position within the current window, resets to 1 each window
+            block_trial : trial number within the current session
+        """
+        reward_probs = self._validate_probs(reward_probs)
+        n_sessions = reward_probs.shape[0]
+        window_starts = self._window_boundaries(n_sessions, n_block_min, n_block_max)
+        print(
+            f"Starting training: {n_sessions} sessions, "
+            f"window size {n_block_min}-{n_block_max} blocks, "
+            f"min {min_block_trials} trials/session, p_switch={p_switch} "
+            f"[{self.train_type}]..."
+        )
 
         training_data = []
-        reset_idxs = self._reset_idxs(n_sessions)
+        window_id = 0
+        block_id_in_window = 0
 
         for session_idx in tqdm(range(n_sessions), disable=not progress_bar):
-            session_reward_probs = reward_probs[session_idx]
+            if session_idx in window_starts:
+                lstm_hidden_state = None  # reset hidden state at window boundary
+                window_id += 1
+                block_id_in_window = 0
+
+            block_reward_probs = reward_probs[session_idx]
+            block_id_in_window += 1
+            session_start_hidden = lstm_hidden_state  # save for gradient pass
 
             input_tensors_for_update, model_actions_taken, rewards_received = [], [], []
-
             current_input_for_model = torch.zeros(
                 (1, 1, self.input_size), device=self.device
             )
 
-            if session_idx in reset_idxs:
-                lstm_hidden_state = None  # reset hidden state
-            session_start_hidden = (
-                lstm_hidden_state  # save start state for gradient pass
-            )
-
-            for _ in range(n_trials):
+            trial = 0
+            while True:
                 policy_logits_step, _, lstm_hidden_state = self.model(
                     current_input_for_model, lstm_hidden_state
                 )
 
                 prob_step = F.softmax(policy_logits_step.squeeze(0), dim=-1)
                 dist_step = torch.distributions.Categorical(prob_step)
-
-                # Greedy action is not preferable, limits exploration
-                # model_action = torch.argmax(prob_step).item()  # Greedy action (0 or 1)
                 model_action = dist_step.sample().item()
+                env_action = model_action + 1
 
-                env_action = model_action + 1  # Convert to 1 or 2
-
-                # session_reward_probs is [p_for_arm1, p_for_arm2]. model_action 0 corresponds to arm1.
                 reward = (
-                    1.0 if random.random() < session_reward_probs[model_action] else 0.0
+                    1.0 if random.random() < block_reward_probs[model_action] else 0.0
                 )
 
                 model_actions_taken.append(model_action)
@@ -314,20 +303,30 @@ class BanditTrainer2Arm:
                 input_tensors_for_update.append(next_input_tensor)
                 current_input_for_model = next_input_tensor.unsqueeze(0).unsqueeze(0)
 
-                training_data.append(
-                    {
-                        "session_id": session_idx + 1,
-                        "chosen_action": env_action,
-                        "reward": reward,
-                        "arm1_reward_prob": session_reward_probs[0],
-                        "arm2_reward_prob": session_reward_probs[1],
-                    }
-                )
+                if return_df:
+                    training_data.append(
+                        {
+                            "session_id": session_idx + 1,
+                            "window_id": window_id,
+                            "block_id": block_id_in_window,
+                            "block_trial": trial + 1,
+                            "chosen_action": env_action,
+                            "reward": reward,
+                            "arm1_reward_prob": block_reward_probs[0],
+                            "arm2_reward_prob": block_reward_probs[1],
+                        }
+                    )
+
+                trial += 1
+                if trial >= min_block_trials and (
+                    random.random() < p_switch or trial >= max_block_trials
+                ):
+                    break
 
             G = self._discounted_return(rewards_received)
             x_seq_tensor = torch.stack(input_tensors_for_update).unsqueeze(0)
 
-            # Detach carried hidden state to prevent backprop through previous sessions
+            # Detach hidden state to prevent backprop through previous sessions
             if lstm_hidden_state is not None:
                 if isinstance(lstm_hidden_state, tuple):
                     lstm_hidden_state = tuple(h.detach() for h in lstm_hidden_state)
@@ -372,28 +371,34 @@ class BanditTrainer2Arm:
             else float("nan")
         )
         print(f"Training complete. Final avg loss: {final_avg_loss:.4f}")
-        self.model._is_trained = True  # 👈 mark as trained
+        self.model._is_trained = True
 
         if save_model:
             self.save_model()
 
         if return_df:
             print("Returning training results as DataFrame.")
-            df_training_results = pd.DataFrame(training_data)
-            return df_training_results
-        else:
-            # print("Training results not returned as DataFrame.")
-            return None
+            return pd.DataFrame(training_data)
+        return None
 
     def evaluate(
-        self, mode, n_sessions=200, n_trials=200, progress_bar=True, **prob_kwargs
+        self,
+        reward_probs,
+        min_block_trials=100,
+        p_switch=0.02,
+        max_block_trials=500,
+        n_block_min=4,
+        n_block_max=8,
+        progress_bar=True,
     ):
+        """
+        Evaluate the trained model using the same window/block structure as training.
+
+        `reward_probs` must be a numpy array of shape (N, 2). Actions are selected
+        greedily (argmax). Returns a DataFrame with session_id, window_id, block_id,
+        block_trial.
+        """
         print("Starting evaluation with fixed weights...")
-        # try:
-        #     self.load_model()  # Loads model and sets to eval mode
-        # except FileNotFoundError:
-        #     print(f"Evaluation failed: Model file not found at {self.model_path}.")
-        #     return pd.DataFrame()
 
         if not hasattr(self.model, "_is_trained") or not self.model._is_trained:
             try:
@@ -404,53 +409,62 @@ class BanditTrainer2Arm:
                 print(f"Evaluation failed: Model file not found at {self.model_path}.")
                 return pd.DataFrame()
 
-        reward_probs = self._get_reward_probs(mode, N=n_sessions, **prob_kwargs)
+        reward_probs = self._validate_probs(reward_probs)
+        n_sessions = reward_probs.shape[0]
+        window_starts = self._window_boundaries(n_sessions, n_block_min, n_block_max)
+
         evaluation_data = []
-        reset_idxs = self._reset_idxs(n_sessions)
+        window_id = 0
+        block_id_in_window = 0
 
-        session_group = 0
         for session_idx in tqdm(range(n_sessions), disable=not progress_bar):
-            session_reward_probs = reward_probs[session_idx]
+            if session_idx in window_starts:
+                lstm_hidden_state = None  # reset at window boundary
+                window_id += 1
+                block_id_in_window = 0
 
+            block_reward_probs = reward_probs[session_idx]
+            block_id_in_window += 1
             current_input_for_model = torch.zeros(
                 (1, 1, self.input_size), device=self.device
             )
 
-            if session_idx in reset_idxs:
-                lstm_hidden_state = None
-                session_group += 1  # Increment session_group for each reset
-
-            for _ in range(n_trials):
+            trial = 0
+            while True:
                 with torch.no_grad():
                     policy_logits_step, _, lstm_hidden_state = self.model(
                         current_input_for_model, lstm_hidden_state
                     )
 
                 prob_step = F.softmax(policy_logits_step.squeeze(0), dim=-1)
-                # Keeping the model action deterministic for evaluation as we want to see if the model learned the optimal policy.
-                model_action = torch.argmax(prob_step).item()  # Greedy action (0 or 1)
-                # dist_step = torch.distributions.Categorical(prob_step)
-                # model_action = dist_step.sample().item()
-
-                env_action = model_action + 1  # Convert to 1 or 2
+                model_action = torch.argmax(prob_step).item()  # greedy
+                env_action = model_action + 1
 
                 reward = (
-                    1.0 if random.random() < session_reward_probs[model_action] else 0.0
+                    1.0 if random.random() < block_reward_probs[model_action] else 0.0
                 )
 
                 evaluation_data.append(
                     {
                         "session_id": session_idx + 1,
-                        "session_group": session_group,
+                        "window_id": window_id,
+                        "block_id": block_id_in_window,
+                        "block_trial": trial + 1,
                         "chosen_action": env_action,
                         "reward": reward,
-                        "arm1_reward_prob": session_reward_probs[0],
-                        "arm2_reward_prob": session_reward_probs[1],
+                        "arm1_reward_prob": block_reward_probs[0],
+                        "arm2_reward_prob": block_reward_probs[1],
                     }
                 )
 
                 next_input_tensor = self._generate_input(env_action, reward)
                 current_input_for_model = next_input_tensor.unsqueeze(0).unsqueeze(0)
+
+                trial += 1
+                if trial >= min_block_trials and (
+                    random.random() < p_switch or trial >= max_block_trials
+                ):
+                    break
 
         df_evaluation_results = pd.DataFrame(evaluation_data)
         print("Evaluation complete.")
