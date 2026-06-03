@@ -377,7 +377,9 @@ class BanditTrainer2Arm:
             if session_idx < warmup_steps:
                 new_lr = self.lr * (session_idx + 1) / warmup_steps
             else:
-                progress = (session_idx - warmup_steps) / max(1, n_sessions - warmup_steps)
+                progress = (session_idx - warmup_steps) / max(
+                    1, n_sessions - warmup_steps
+                )
                 new_lr = self.lr_min + 0.5 * (self.lr - self.lr_min) * (
                     1.0 + math.cos(math.pi * progress)
                 )
