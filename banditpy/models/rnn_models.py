@@ -502,6 +502,7 @@ class BanditTrainer2Arm:
             "training_loss_history": self.training_loss_history,
             "optimizer_state_dict": self.optimizer.state_dict(),
             "lr": self.lr,
+            "lr_min": self.lr_min,
             "input_size": self.input_size,
             "hidden_size": self.model.hidden_size,
             "beta_entropy": self.beta_entropy,
@@ -526,6 +527,7 @@ class BanditTrainer2Arm:
         beta_value = checkpoint.get("beta_value", 0.025)
         gamma = checkpoint.get("gamma", 0.9)
         lr = checkpoint.get("lr", 0.00004)
+        lr_min = checkpoint.get("lr_min", 1e-6)
 
         # Create trainer instance with matching config
         trainer = BanditTrainer2Arm(
@@ -535,6 +537,7 @@ class BanditTrainer2Arm:
             beta_value=beta_value,
             gamma=gamma,
             lr=lr,
+            lr_min=lr_min,
             model_path=model_path,
             device=device,
         )
