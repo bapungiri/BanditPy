@@ -123,6 +123,7 @@ class BanditTrainer2Arm:
         hidden_size=48,
         num_model_actions=2,  # Model outputs Q-values for 2 actions (0, 1)
         lr=0.00004,
+        lr_min=1e-6,
         gamma=0.9,
         beta_entropy=0.045,
         beta_value=0.025,
@@ -131,6 +132,7 @@ class BanditTrainer2Arm:
     ):
 
         self.lr = lr
+        self.lr_min = lr_min
         self.gamma = gamma
         self.beta_entropy = beta_entropy
         self.beta_value = beta_value
@@ -235,6 +237,7 @@ class BanditTrainer2Arm:
         save_model=False,
         progress_bar=True,
         clip_norm=1.0,
+        lr_warmup_frac=0.02,
     ):
         """
         Train on a block-structured task matching the animal paradigm.
@@ -246,6 +249,9 @@ class BanditTrainer2Arm:
         least `min_block_trials` trials, after which there is a `p_switch` probability
         per trial of ending the session.
 
+        LR schedule: linear warmup over the first `lr_warmup_frac` of sessions,
+        then cosine decay from `self.lr` down to `self.lr_min`.
+
         Output DataFrame columns (when return_df=True):
             session_id  : global 1..N, one per probability combination
             window_id   : increments at each hidden-state reset
@@ -255,11 +261,13 @@ class BanditTrainer2Arm:
         reward_probs = self._validate_probs(reward_probs)
         n_sessions = reward_probs.shape[0]
         window_starts = self._window_boundaries(n_sessions, n_block_min, n_block_max)
+        warmup_steps = max(1, int(n_sessions * lr_warmup_frac))
         print(
             f"Starting training: {n_sessions} sessions, "
             f"window size {n_block_min}-{n_block_max} blocks, "
             f"min {min_block_trials} trials/session, p_switch={p_switch} "
-            f"[{self.train_type}]..."
+            f"[{self.train_type}], lr {self.lr:.2e}→{self.lr_min:.2e} "
+            f"(warmup {warmup_steps} sessions)..."
         )
 
         training_data = []
@@ -364,6 +372,17 @@ class BanditTrainer2Arm:
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=clip_norm)
             self.optimizer.step()
+
+            # Warmup + cosine LR decay (stepped per session)
+            if session_idx < warmup_steps:
+                new_lr = self.lr * (session_idx + 1) / warmup_steps
+            else:
+                progress = (session_idx - warmup_steps) / max(1, n_sessions - warmup_steps)
+                new_lr = self.lr_min + 0.5 * (self.lr - self.lr_min) * (
+                    1.0 + math.cos(math.pi * progress)
+                )
+            for pg in self.optimizer.param_groups:
+                pg["lr"] = new_lr
 
         final_avg_loss = (
             np.mean(self.training_loss_history[-100:])
