@@ -122,7 +122,7 @@ class BanditTrainer2Arm:
         input_size=3,  # 2 for one-hot action (1,2) + 1 for reward
         hidden_size=48,
         num_model_actions=2,  # Model outputs Q-values for 2 actions (0, 1)
-        lr=0.00004,
+        lr=0.0001,  # Based on lr vs performance search in struc/unstruc env
         lr_min=1e-6,
         gamma=0.9,
         beta_entropy=0.045,
@@ -238,6 +238,7 @@ class BanditTrainer2Arm:
         progress_bar=True,
         clip_norm=1.0,
         lr_warmup_frac=0.02,
+        update_every_window=False,
     ):
         """
         Train on a block-structured task matching the animal paradigm.
@@ -251,6 +252,14 @@ class BanditTrainer2Arm:
 
         LR schedule: linear warmup over the first `lr_warmup_frac` of sessions,
         then cosine decay from `self.lr` down to `self.lr_min`.
+
+        update_every_window (bool): If True, uses meta-RL style training where weights
+            are updated once per window. Behavioral sampling is done under torch.no_grad()
+            and a single replay forward pass chains hidden states across all sessions in
+            the window without detaching, so gradients flow through the full hidden-state
+            trajectory. Loss is averaged over sessions in the window before stepping.
+            If False (default), weights are updated once per session with hidden states
+            detached between sessions (original TBPTT behaviour).
 
         Output DataFrame columns (when return_df=True):
             session_id  : global 1..N, one per probability combination
@@ -267,113 +276,22 @@ class BanditTrainer2Arm:
             f"window size {n_block_min}-{n_block_max} blocks, "
             f"min {min_block_trials} trials/session, p_switch={p_switch} "
             f"[{self.train_type}], lr {self.lr:.2e}→{self.lr_min:.2e} "
-            f"(warmup {warmup_steps} sessions)..."
+            f"(warmup {warmup_steps} sessions, "
+            f"update={'window' if update_every_window else 'session'})..."
         )
 
         training_data = []
         window_id = 0
         block_id_in_window = 0
+        lstm_hidden_state = None
 
-        for session_idx in tqdm(range(n_sessions), disable=not progress_bar):
-            if session_idx in window_starts:
-                lstm_hidden_state = None  # reset hidden state at window boundary
-                window_id += 1
-                block_id_in_window = 0
+        # Buffers for window-level updates (used only when update_every_window=True)
+        _win_inputs = []  # x_seq_tensor per session in current window
+        _win_actions = []  # actions_tensor per session
+        _win_returns = []  # discounted-return tensor per session
+        _last_session_idx = 0
 
-            block_reward_probs = reward_probs[session_idx]
-            block_id_in_window += 1
-            session_start_hidden = lstm_hidden_state  # save for gradient pass
-
-            input_tensors_for_update, model_actions_taken, rewards_received = [], [], []
-            current_input_for_model = torch.zeros(
-                (1, 1, self.input_size), device=self.device
-            )
-
-            trial = 0
-            while True:
-                policy_logits_step, _, lstm_hidden_state = self.model(
-                    current_input_for_model, lstm_hidden_state
-                )
-
-                prob_step = F.softmax(policy_logits_step.squeeze(0), dim=-1)
-                dist_step = torch.distributions.Categorical(prob_step)
-                model_action = dist_step.sample().item()
-                env_action = model_action + 1
-
-                reward = (
-                    1.0 if random.random() < block_reward_probs[model_action] else 0.0
-                )
-
-                model_actions_taken.append(model_action)
-                rewards_received.append(reward)
-
-                next_input_tensor = self._generate_input(env_action, reward)
-                input_tensors_for_update.append(next_input_tensor)
-                current_input_for_model = next_input_tensor.unsqueeze(0).unsqueeze(0)
-
-                if return_df:
-                    training_data.append(
-                        {
-                            "session_id": session_idx + 1,
-                            "window_id": window_id,
-                            "block_id": block_id_in_window,
-                            "block_trial": trial + 1,
-                            "chosen_action": env_action,
-                            "reward": reward,
-                            "arm1_reward_prob": block_reward_probs[0],
-                            "arm2_reward_prob": block_reward_probs[1],
-                        }
-                    )
-
-                trial += 1
-                if trial >= min_block_trials and (
-                    random.random() < p_switch or trial >= max_block_trials
-                ):
-                    break
-
-            G = self._discounted_return(rewards_received)
-            x_seq_tensor = torch.stack(input_tensors_for_update).unsqueeze(0)
-
-            # Detach hidden state to prevent backprop through previous sessions
-            if lstm_hidden_state is not None:
-                if isinstance(lstm_hidden_state, tuple):
-                    lstm_hidden_state = tuple(h.detach() for h in lstm_hidden_state)
-                else:
-                    lstm_hidden_state = lstm_hidden_state.detach()
-
-            policy_logits_seq, value_estimates_seq, _ = self.model(
-                x_seq_tensor, session_start_hidden
-            )
-            policy_logits_seq = policy_logits_seq.squeeze(0)
-            value_estimates_seq = value_estimates_seq.squeeze(0)
-
-            actions_tensor = torch.tensor(
-                model_actions_taken, dtype=torch.long, device=self.device
-            )
-            log_probs = torch.distributions.Categorical(
-                logits=policy_logits_seq
-            ).log_prob(actions_tensor)
-            advantage = G - value_estimates_seq
-            policy_loss = -(log_probs * advantage.detach()).mean()
-            value_loss = self.beta_value * advantage.pow(2).mean()
-            dist_entropy = (
-                torch.distributions.Categorical(logits=policy_logits_seq)
-                .entropy()
-                .mean()
-            )
-            entropy_bonus = -self.beta_entropy * dist_entropy
-            loss = policy_loss + value_loss + entropy_bonus
-
-            self.policy_loss_history.append(policy_loss.item())
-            self.value_loss_history.append(value_loss.item())
-            self.entropy_bonus_history.append(entropy_bonus.item())
-            self.training_loss_history.append(loss.item())
-            self.optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=clip_norm)
-            self.optimizer.step()
-
-            # Warmup + cosine LR decay (stepped per session)
+        def _apply_lr(session_idx):
             if session_idx < warmup_steps:
                 new_lr = self.lr * (session_idx + 1) / warmup_steps
             else:
@@ -385,6 +303,220 @@ class BanditTrainer2Arm:
                 )
             for pg in self.optimizer.param_groups:
                 pg["lr"] = new_lr
+
+        def _flush_window(last_session_idx):
+            """Replay the window with chained hidden state and do one optimizer step."""
+            replay_hidden = None  # windows always start from a reset state
+            window_session_losses = []
+            for x_seq, actions_t, G_ret in zip(_win_inputs, _win_actions, _win_returns):
+                policy_logits_seq, value_estimates_seq, replay_hidden = self.model(
+                    x_seq, replay_hidden
+                )
+                # replay_hidden is NOT detached: gradients flow across sessions
+                policy_logits_seq = policy_logits_seq.squeeze(0)
+                value_estimates_seq = value_estimates_seq.squeeze(0)
+
+                log_probs = torch.distributions.Categorical(
+                    logits=policy_logits_seq
+                ).log_prob(actions_t)
+                advantage = G_ret - value_estimates_seq
+                policy_loss = -(log_probs * advantage.detach()).mean()
+                value_loss = self.beta_value * advantage.pow(2).mean()
+                dist_entropy = (
+                    torch.distributions.Categorical(logits=policy_logits_seq)
+                    .entropy()
+                    .mean()
+                )
+                entropy_bonus = -self.beta_entropy * dist_entropy
+                session_loss = policy_loss + value_loss + entropy_bonus
+                window_session_losses.append(session_loss)
+
+                # Track per-session loss history at the same granularity as per-session mode
+                self.policy_loss_history.append(policy_loss.item())
+                self.value_loss_history.append(value_loss.item())
+                self.entropy_bonus_history.append(entropy_bonus.item())
+                self.training_loss_history.append(session_loss.item())
+
+            avg_loss = torch.stack(window_session_losses).mean()
+            self.optimizer.zero_grad()
+            avg_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=clip_norm)
+            self.optimizer.step()
+            _apply_lr(last_session_idx)
+
+            _win_inputs.clear()
+            _win_actions.clear()
+            _win_returns.clear()
+
+        for session_idx in tqdm(range(n_sessions), disable=not progress_bar):
+            if session_idx in window_starts:
+                # Flush the previous window before resetting the hidden state
+                if update_every_window and _win_inputs:
+                    _flush_window(_last_session_idx)
+                lstm_hidden_state = None  # reset hidden state at window boundary
+                window_id += 1
+                block_id_in_window = 0
+
+            block_reward_probs = reward_probs[session_idx]
+            block_id_in_window += 1
+
+            input_tensors_for_update, model_actions_taken, rewards_received = [], [], []
+            current_input_for_model = torch.zeros(
+                (1, 1, self.input_size), device=self.device
+            )
+
+            trial = 0
+
+            if update_every_window:
+                # ---- Meta-RL mode: sample under no_grad, defer weight update ----
+                with torch.no_grad():
+                    while True:
+                        policy_logits_step, _, lstm_hidden_state = self.model(
+                            current_input_for_model, lstm_hidden_state
+                        )
+                        prob_step = F.softmax(policy_logits_step.squeeze(0), dim=-1)
+                        dist_step = torch.distributions.Categorical(prob_step)
+                        model_action = dist_step.sample().item()
+                        env_action = model_action + 1
+                        reward = (
+                            1.0
+                            if random.random() < block_reward_probs[model_action]
+                            else 0.0
+                        )
+                        model_actions_taken.append(model_action)
+                        rewards_received.append(reward)
+                        next_input_tensor = self._generate_input(env_action, reward)
+                        input_tensors_for_update.append(next_input_tensor)
+                        current_input_for_model = next_input_tensor.unsqueeze(
+                            0
+                        ).unsqueeze(0)
+                        if return_df:
+                            training_data.append(
+                                {
+                                    "session_id": session_idx + 1,
+                                    "window_id": window_id,
+                                    "block_id": block_id_in_window,
+                                    "block_trial": trial + 1,
+                                    "chosen_action": env_action,
+                                    "reward": reward,
+                                    "arm1_reward_prob": block_reward_probs[0],
+                                    "arm2_reward_prob": block_reward_probs[1],
+                                }
+                            )
+                        trial += 1
+                        if trial >= min_block_trials and (
+                            random.random() < p_switch or trial >= max_block_trials
+                        ):
+                            break
+
+                # Detach sampling hidden state before passing to the next session
+                if lstm_hidden_state is not None:
+                    if isinstance(lstm_hidden_state, tuple):
+                        lstm_hidden_state = tuple(h.detach() for h in lstm_hidden_state)
+                    else:
+                        lstm_hidden_state = lstm_hidden_state.detach()
+
+                G = self._discounted_return(rewards_received)
+                x_seq_tensor = torch.stack(input_tensors_for_update).unsqueeze(0)
+                actions_tensor = torch.tensor(
+                    model_actions_taken, dtype=torch.long, device=self.device
+                )
+                _win_inputs.append(x_seq_tensor)
+                _win_actions.append(actions_tensor)
+                _win_returns.append(G)
+                _last_session_idx = session_idx
+
+            else:
+                # ---- Per-session mode: original TBPTT behaviour ----
+                session_start_hidden = lstm_hidden_state  # save for gradient pass
+
+                while True:
+                    policy_logits_step, _, lstm_hidden_state = self.model(
+                        current_input_for_model, lstm_hidden_state
+                    )
+                    prob_step = F.softmax(policy_logits_step.squeeze(0), dim=-1)
+                    dist_step = torch.distributions.Categorical(prob_step)
+                    model_action = dist_step.sample().item()
+                    env_action = model_action + 1
+                    reward = (
+                        1.0
+                        if random.random() < block_reward_probs[model_action]
+                        else 0.0
+                    )
+                    model_actions_taken.append(model_action)
+                    rewards_received.append(reward)
+                    next_input_tensor = self._generate_input(env_action, reward)
+                    input_tensors_for_update.append(next_input_tensor)
+                    current_input_for_model = next_input_tensor.unsqueeze(0).unsqueeze(
+                        0
+                    )
+                    if return_df:
+                        training_data.append(
+                            {
+                                "session_id": session_idx + 1,
+                                "window_id": window_id,
+                                "block_id": block_id_in_window,
+                                "block_trial": trial + 1,
+                                "chosen_action": env_action,
+                                "reward": reward,
+                                "arm1_reward_prob": block_reward_probs[0],
+                                "arm2_reward_prob": block_reward_probs[1],
+                            }
+                        )
+                    trial += 1
+                    if trial >= min_block_trials and (
+                        random.random() < p_switch or trial >= max_block_trials
+                    ):
+                        break
+
+                G = self._discounted_return(rewards_received)
+                x_seq_tensor = torch.stack(input_tensors_for_update).unsqueeze(0)
+
+                # Detach hidden state to prevent backprop through previous sessions
+                if lstm_hidden_state is not None:
+                    if isinstance(lstm_hidden_state, tuple):
+                        lstm_hidden_state = tuple(h.detach() for h in lstm_hidden_state)
+                    else:
+                        lstm_hidden_state = lstm_hidden_state.detach()
+
+                policy_logits_seq, value_estimates_seq, _ = self.model(
+                    x_seq_tensor, session_start_hidden
+                )
+                policy_logits_seq = policy_logits_seq.squeeze(0)
+                value_estimates_seq = value_estimates_seq.squeeze(0)
+
+                actions_tensor = torch.tensor(
+                    model_actions_taken, dtype=torch.long, device=self.device
+                )
+                log_probs = torch.distributions.Categorical(
+                    logits=policy_logits_seq
+                ).log_prob(actions_tensor)
+                advantage = G - value_estimates_seq
+                policy_loss = -(log_probs * advantage.detach()).mean()
+                value_loss = self.beta_value * advantage.pow(2).mean()
+                dist_entropy = (
+                    torch.distributions.Categorical(logits=policy_logits_seq)
+                    .entropy()
+                    .mean()
+                )
+                entropy_bonus = -self.beta_entropy * dist_entropy
+                loss = policy_loss + value_loss + entropy_bonus
+
+                self.policy_loss_history.append(policy_loss.item())
+                self.value_loss_history.append(value_loss.item())
+                self.entropy_bonus_history.append(entropy_bonus.item())
+                self.training_loss_history.append(loss.item())
+                self.optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), max_norm=clip_norm
+                )
+                self.optimizer.step()
+                _apply_lr(session_idx)
+
+        # Flush the final window (update_every_window mode only)
+        if update_every_window and _win_inputs:
+            _flush_window(_last_session_idx)
 
         final_avg_loss = (
             np.mean(self.training_loss_history[-100:])
