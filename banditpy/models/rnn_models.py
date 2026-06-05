@@ -238,57 +238,132 @@ class BanditTrainer2Arm:
         progress_bar=True,
         clip_norm=1.0,
         lr_warmup_frac=0.02,
-        update_every_window=False,
+        hidden_reset_every="window",
+        update_every="session",
     ):
         """
         Train on a block-structured task matching the animal paradigm.
 
         `reward_probs` must be a numpy array of shape (N, 2) with reward probabilities
         for each arm (use generate_probs_2arm to create it). N determines the number of
-        sessions. Window boundaries (LSTM hidden state resets) are sampled uniformly
-        from [n_block_min, n_block_max] sessions apart. Each session runs for at
-        least `min_block_trials` trials, after which there is a `p_switch` probability
-        per trial of ending the session.
+        sessions. Each session runs for at least `min_block_trials` trials, after which
+        there is a `p_switch` probability per trial of ending the session.
 
         LR schedule: linear warmup over the first `lr_warmup_frac` of sessions,
         then cosine decay from `self.lr` down to `self.lr_min`.
 
-        update_every_window (bool): If True, uses meta-RL style training where weights
-            are updated once per window. Behavioral sampling is done under torch.no_grad()
-            and a single replay forward pass chains hidden states across all sessions in
-            the window without detaching, so gradients flow through the full hidden-state
-            trajectory. Loss is averaged over sessions in the window before stepping.
-            If False (default), weights are updated once per session with hidden states
-            detached between sessions (original TBPTT behaviour).
+        hidden_reset_every : "session" | "window" | int | ("window", int)
+            When the LSTM hidden state is reset to zero.
+            "session"    — reset every session (no cross-session memory).
+            "window"     — reset at random window boundaries sampled uniformly from
+                           [n_block_min, n_block_max] sessions (default).
+            int N        — reset every N sessions (fixed-size window).
+            ("window", N) — reset every N base-windows (hidden state persists
+                            across N random windows before each reset).
+
+        update_every : "session" | "window" | int | ("window", int)
+            When optimizer.step() is called.
+            "session"    — update after every session; hidden state is detached between
+                           sessions (TBPTT, default).
+            "window"     — update whenever the hidden state resets; behavioral sampling
+                           runs under no_grad, then a replay forward pass chains hidden
+                           states across all buffered sessions without detaching so
+                           gradients flow through the full reset-bounded window (meta-RL).
+            int N        — update after every N sessions; same deferred replay as
+                           "window" but with a fixed cadence independent of resets.
+            ("window", N) — update after every N base-windows; e.g. ("window", 3)
+                            accumulates 3 windows then steps once.
+
+        Both arguments share the same base-window rhythm defined by n_block_min /
+        n_block_max, so ("window", N) means the same thing in both.
 
         Output DataFrame columns (when return_df=True):
             session_id  : global 1..N, one per probability combination
             window_id   : increments at each hidden-state reset
-            block_id    : position within the current window, resets to 1 each window
+            block_id    : position within the current window, resets to 1 each reset
             block_trial : trial number within the current session
         """
+
+        def _valid_spec(spec):
+            return (
+                spec in {"session", "window"}
+                or isinstance(spec, int)
+                or (
+                    isinstance(spec, tuple)
+                    and len(spec) == 2
+                    and spec[0] == "window"
+                    and isinstance(spec[1], int)
+                    and spec[1] >= 1
+                )
+            )
+
+        if not _valid_spec(hidden_reset_every):
+            raise ValueError(
+                "hidden_reset_every must be 'session', 'window', int, or ('window', int)"
+            )
+        if not _valid_spec(update_every):
+            raise ValueError(
+                "update_every must be 'session', 'window', int, or ('window', int)"
+            )
+        # Normalise ("window", 1) → "window" for both args
+        if hidden_reset_every == ("window", 1):
+            hidden_reset_every = "window"
+        if update_every == ("window", 1):
+            update_every = "window"
+
         reward_probs = self._validate_probs(reward_probs)
         n_sessions = reward_probs.shape[0]
-        window_starts = self._window_boundaries(n_sessions, n_block_min, n_block_max)
         warmup_steps = max(1, int(n_sessions * lr_warmup_frac))
+
+        # --- Base window rhythm (always computed; reference for ("window", N) specs) ---
+        base_window_starts_set = self._window_boundaries(
+            n_sessions, n_block_min, n_block_max
+        )
+
+        # --- Pre-compute int-based reset/flush sets ---
+        if hidden_reset_every == "session":
+            reset_set = set(range(n_sessions))
+        elif isinstance(hidden_reset_every, int):
+            reset_set = set(range(0, n_sessions, int(hidden_reset_every)))
+        else:
+            reset_set = None  # determined dynamically via base_window_count
+
+        if isinstance(update_every, int):
+            flush_set = set(range(int(update_every) - 1, n_sessions, int(update_every)))
+            flush_set.add(n_sessions - 1)
+        else:
+            flush_set = None  # determined dynamically
+
+        _do_deferred = update_every != "session"
+
+        def _spec_label(spec):
+            if spec == "session":
+                return "session"
+            elif spec == "window":
+                return f"window (~{n_block_min}-{n_block_max} sessions)"
+            elif isinstance(spec, int):
+                return f"every {spec} sessions"
+            else:
+                return f"every {spec[1]} base-windows"
+
         print(
             f"Starting training: {n_sessions} sessions, "
             f"window size {n_block_min}-{n_block_max} blocks, "
             f"min {min_block_trials} trials/session, p_switch={p_switch} "
             f"[{self.train_type}], lr {self.lr:.2e}→{self.lr_min:.2e} "
             f"(warmup {warmup_steps} sessions, "
-            f"update={'window' if update_every_window else 'session'})..."
+            f"reset={_spec_label(hidden_reset_every)}, "
+            f"update={_spec_label(update_every)})..."
         )
 
         training_data = []
         window_id = 0
         block_id_in_window = 0
         lstm_hidden_state = None
+        base_window_count = 0  # increments at every base_window_starts_set entry
 
-        # Buffers for window-level updates (used only when update_every_window=True)
-        _win_inputs = []  # x_seq_tensor per session in current window
-        _win_actions = []  # actions_tensor per session
-        _win_returns = []  # discounted-return tensor per session
+        # Buffer for deferred updates: list of dicts, one per session
+        _buffer = []
         _last_session_idx = 0
 
         def _apply_lr(session_idx):
@@ -304,22 +379,28 @@ class BanditTrainer2Arm:
             for pg in self.optimizer.param_groups:
                 pg["lr"] = new_lr
 
-        def _flush_window(last_session_idx):
-            """Replay the window with chained hidden state and do one optimizer step."""
-            replay_hidden = None  # windows always start from a reset state
-            window_session_losses = []
-            for x_seq, actions_t, G_ret in zip(_win_inputs, _win_actions, _win_returns):
+        def _flush(last_session_idx):
+            """
+            Replay all buffered sessions. Hidden state resets at entries flagged
+            is_reset=True. Gradients flow freely within each reset-bounded segment.
+            Loss is averaged over all buffered sessions before the optimizer step.
+            """
+            replay_hidden = None
+            session_losses = []
+            for item in _buffer:
+                if item["is_reset"]:
+                    replay_hidden = None  # episode boundary: restart hidden state
                 policy_logits_seq, value_estimates_seq, replay_hidden = self.model(
-                    x_seq, replay_hidden
+                    item["x_seq"], replay_hidden
                 )
-                # replay_hidden is NOT detached: gradients flow across sessions
+                # replay_hidden NOT detached: gradients flow within each reset segment
                 policy_logits_seq = policy_logits_seq.squeeze(0)
                 value_estimates_seq = value_estimates_seq.squeeze(0)
 
                 log_probs = torch.distributions.Categorical(
                     logits=policy_logits_seq
-                ).log_prob(actions_t)
-                advantage = G_ret - value_estimates_seq
+                ).log_prob(item["actions"])
+                advantage = item["G"] - value_estimates_seq
                 policy_loss = -(log_probs * advantage.detach()).mean()
                 value_loss = self.beta_value * advantage.pow(2).mean()
                 dist_entropy = (
@@ -329,31 +410,59 @@ class BanditTrainer2Arm:
                 )
                 entropy_bonus = -self.beta_entropy * dist_entropy
                 session_loss = policy_loss + value_loss + entropy_bonus
-                window_session_losses.append(session_loss)
+                session_losses.append(session_loss)
 
-                # Track per-session loss history at the same granularity as per-session mode
+                # Track histories at per-session granularity
                 self.policy_loss_history.append(policy_loss.item())
                 self.value_loss_history.append(value_loss.item())
                 self.entropy_bonus_history.append(entropy_bonus.item())
                 self.training_loss_history.append(session_loss.item())
 
-            avg_loss = torch.stack(window_session_losses).mean()
+            avg_loss = torch.stack(session_losses).mean()
             self.optimizer.zero_grad()
             avg_loss.backward()
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=clip_norm)
             self.optimizer.step()
             _apply_lr(last_session_idx)
-
-            _win_inputs.clear()
-            _win_actions.clear()
-            _win_returns.clear()
+            _buffer.clear()
 
         for session_idx in tqdm(range(n_sessions), disable=not progress_bar):
-            if session_idx in window_starts:
-                # Flush the previous window before resetting the hidden state
-                if update_every_window and _win_inputs:
-                    _flush_window(_last_session_idx)
-                lstm_hidden_state = None  # reset hidden state at window boundary
+            is_base_window_start = session_idx in base_window_starts_set
+            if is_base_window_start:
+                base_window_count += 1
+
+            # --- Compute is_reset ---
+            if reset_set is not None:
+                is_reset = session_idx in reset_set
+            elif hidden_reset_every == "window":
+                is_reset = is_base_window_start
+            else:  # ("window", N): reset at base-windows 1, N+1, 2N+1, ...
+                N_r = hidden_reset_every[1]
+                is_reset = is_base_window_start and (base_window_count - 1) % N_r == 0
+
+            # --- Compute should_flush (deferred modes only) ---
+            # Flush happens BEFORE the hidden state reset so the previous window's
+            # data is consumed before the new episode begins.
+            if _do_deferred and _buffer:
+                if update_every == "window":
+                    # Flush at every hidden-state reset
+                    should_flush = is_reset
+                elif isinstance(update_every, int):
+                    should_flush = session_idx in flush_set
+                else:  # ("window", N): flush after every N base-windows
+                    # Fire at base-window starts 2, N+1, 2N+1, ... (i.e. after N
+                    # complete windows: (base_window_count-1) % N == 0 and count > 1)
+                    N_u = update_every[1]
+                    should_flush = (
+                        is_base_window_start
+                        and base_window_count > 1
+                        and (base_window_count - 1) % N_u == 0
+                    )
+                if should_flush:
+                    _flush(_last_session_idx)
+
+            if is_reset:
+                lstm_hidden_state = None
                 window_id += 1
                 block_id_in_window = 0
 
@@ -364,11 +473,10 @@ class BanditTrainer2Arm:
             current_input_for_model = torch.zeros(
                 (1, 1, self.input_size), device=self.device
             )
-
             trial = 0
 
-            if update_every_window:
-                # ---- Meta-RL mode: sample under no_grad, defer weight update ----
+            if _do_deferred:
+                # ---- Deferred mode: sample under no_grad, buffer data ----
                 with torch.no_grad():
                     while True:
                         policy_logits_step, _, lstm_hidden_state = self.model(
@@ -409,7 +517,7 @@ class BanditTrainer2Arm:
                         ):
                             break
 
-                # Detach sampling hidden state before passing to the next session
+                # Detach sampling hidden state (already no_grad, explicit for clarity)
                 if lstm_hidden_state is not None:
                     if isinstance(lstm_hidden_state, tuple):
                         lstm_hidden_state = tuple(h.detach() for h in lstm_hidden_state)
@@ -417,18 +525,25 @@ class BanditTrainer2Arm:
                         lstm_hidden_state = lstm_hidden_state.detach()
 
                 G = self._discounted_return(rewards_received)
-                x_seq_tensor = torch.stack(input_tensors_for_update).unsqueeze(0)
-                actions_tensor = torch.tensor(
-                    model_actions_taken, dtype=torch.long, device=self.device
+                _buffer.append(
+                    {
+                        "x_seq": torch.stack(input_tensors_for_update).unsqueeze(0),
+                        "actions": torch.tensor(
+                            model_actions_taken, dtype=torch.long, device=self.device
+                        ),
+                        "G": G,
+                        "is_reset": is_reset,
+                    }
                 )
-                _win_inputs.append(x_seq_tensor)
-                _win_actions.append(actions_tensor)
-                _win_returns.append(G)
                 _last_session_idx = session_idx
 
+                # Flush for int N update_every
+                if isinstance(update_every, int) and session_idx in flush_set:
+                    _flush(session_idx)
+
             else:
-                # ---- Per-session mode: original TBPTT behaviour ----
-                session_start_hidden = lstm_hidden_state  # save for gradient pass
+                # ---- Per-session TBPTT mode ----
+                session_start_hidden = lstm_hidden_state
 
                 while True:
                     policy_logits_step, _, lstm_hidden_state = self.model(
@@ -514,9 +629,9 @@ class BanditTrainer2Arm:
                 self.optimizer.step()
                 _apply_lr(session_idx)
 
-        # Flush the final window (update_every_window mode only)
-        if update_every_window and _win_inputs:
-            _flush_window(_last_session_idx)
+        # Final flush for any remaining buffered sessions
+        if _do_deferred and _buffer:
+            _flush(_last_session_idx)
 
         final_avg_loss = (
             np.mean(self.training_loss_history[-100:])
