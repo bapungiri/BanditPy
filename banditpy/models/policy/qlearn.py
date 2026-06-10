@@ -24,10 +24,10 @@ class Qlearn2Arm(BasePolicy):
 
     class Params(ParameterGroup):
         alpha_c = ParameterSpec(
-            "alpha_c", (0.0, 1.0), description="Learning rate for chosen option"
+            "alpha_c", (-0.99, 0.99), description="Learning rate for chosen option"
         )
         alpha_u = ParameterSpec(
-            "alpha_u", (0.0, 1.0), description="Learning rate for unchosen option"
+            "alpha_u", (-0.99, 0.99), description="Learning rate for unchosen option"
         )
 
     def reset(self):
