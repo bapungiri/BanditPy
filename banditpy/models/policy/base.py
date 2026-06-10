@@ -40,6 +40,11 @@ class ParameterSpec:
         self.bounds = (lo, hi)
         return self
 
+    def set_value(self, value: float) -> "ParameterSpec":
+        """Set current value in-place. Returns self for chaining."""
+        self.value = value
+        return self
+
     def enable(self) -> "ParameterSpec":
         """Mark as active (will be optimised). Returns self for chaining."""
         self.active = True
