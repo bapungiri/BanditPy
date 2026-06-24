@@ -220,7 +220,7 @@ class DecisionModel:
 
         policy_names = self.policy.active_parameter_names()
         all_bounds_dict = self.policy.get_bounds()
-        bounds = [all_bounds_dict[n] for n in policy_names]
+        bounds = [(n, all_bounds_dict[n]) for n in policy_names]
 
         seeds = rng.integers(0, 2**32 - 1, size=n_starts)
 
