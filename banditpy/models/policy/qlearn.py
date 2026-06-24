@@ -100,6 +100,7 @@ class QlearnBias2Arm(BasePolicy):
 
 
 class QlearnH2Arm(BasePolicy):
+    """Qlearn with perseverance term to add sticky behaviour i.e, propensity to chhoose the same port irrespective of the reward."""
 
     class Params(ParameterGroup):
         alpha_c = ParameterSpec(
