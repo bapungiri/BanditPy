@@ -67,10 +67,10 @@ class QlearnBias2Arm(BasePolicy):
 
     class Params(ParameterGroup):
         alpha_c = ParameterSpec(
-            "alpha_c", (0.0, 1.0), description="Learning rate for chosen option"
+            "alpha_c", (0.0, 0.99), description="Learning rate for chosen option"
         )
         alpha_u = ParameterSpec(
-            "alpha_u", (0.0, 1.0), description="Learning rate for unchosen option"
+            "alpha_u", (-0.99, 0.99), description="Learning rate for unchosen option"
         )
         bias = ParameterSpec(
             "bias", (-2.0, 2.0), default=0.0, description="Bias toward port 0 vs port 1"
