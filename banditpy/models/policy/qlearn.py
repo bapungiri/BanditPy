@@ -335,3 +335,59 @@ class QlearnWM2Arm(BasePolicy):
 
         # --- WM update (perfect one-shot encoding, lr = 1) ---
         self.q_wm[choice] = float(reward)
+
+
+class QlearnDynamicLR2Arm(BasePolicy):
+    """
+    2-arm Q-learning with dynamic learning rate.
+
+    The learning rate is updated based on the prediction error magnitude.
+    """
+
+    class Params(ParameterGroup):
+        alpha_c = ParameterSpec(
+            "alpha_c", (0.0, 1.0), description="Learning rate for chosen option"
+        )
+        alpha_u = ParameterSpec(
+            "alpha_u", (0.0, 1.0), description="Learning rate for unchosen option"
+        )
+        w_c = ParameterSpec(
+            "w_c",
+            (0.0, 1.0),
+            description="Weight for chosen option learning rate update",
+        )
+        w_u = ParameterSpec(
+            "w_u",
+            (0.0, 1.0),
+            description="Weight for unchosen option learning rate update",
+        )
+
+    def reset(self):
+        self.q = np.full(2, 0.5)
+        self.alpha_c = self.params["alpha_c"]
+        self.alpha_u = self.params["alpha_u"]
+
+    def forget(self):
+        pass
+
+    def logits(self):
+        return self.q.copy()
+
+    def update(self, choice, reward):
+        other = 1 - choice
+        pe = reward - self.q[choice]
+
+        # Update learning rates based on prediction error
+        self.alpha_c += (
+            self.params["w_c"] * abs(pe) + (1 - self.params["w_c"]) * self.alpha_c
+        )
+        self.alpha_u += (
+            self.params["w_u"] * abs(pe) + (1 - self.params["w_u"]) * self.alpha_u
+        )
+
+        # Update Q-values
+        self.q[choice] += self.alpha_c * pe
+        self.q[other] += self.alpha_u * pe
+
+        # Clamp Q-values to [0, 1]
+        np.clip(self.q, 0.0, 1.0, out=self.q)
