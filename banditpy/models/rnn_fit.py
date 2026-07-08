@@ -1,6 +1,7 @@
 import math
 import os
 import random
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
@@ -10,6 +11,58 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from .. import core
+from .model import _get_slurm_cpus
+
+
+def _run_fold(
+    fold,
+    train_task,
+    test_task,
+    test_windows,
+    hidden_size,
+    device_str,
+    n_epochs,
+    lr,
+    lr_min,
+    progress_bar,
+):
+    """Module-level worker so ProcessPoolExecutor can pickle it."""
+    import torch  # re-import in subprocess
+
+    torch.set_num_threads(1)  # prevent intra-op thread contention across workers
+
+    fold_fitter = VanillaRNNFit2Arm(
+        task=train_task,
+        hidden_size=hidden_size,
+        segment_starts="window",
+        device=device_str,
+    )
+    fold_fitter.fit(n_epochs=n_epochs, lr=lr, lr_min=lr_min, progress_bar=progress_bar)
+    train_nll = fold_fitter.nll_per_trial
+    n_train = train_task.n_trials
+
+    test_fitter = VanillaRNNFit2Arm(
+        task=test_task,
+        hidden_size=hidden_size,
+        segment_starts="window",
+        device=device_str,
+    )
+    test_fitter.model.load_state_dict(fold_fitter.model.state_dict())
+    test_nll = test_fitter.nll_per_trial
+    n_test = test_task.n_trials
+
+    records = [
+        {
+            "fold": fold,
+            "window_id": w,
+            "train_nll": train_nll,
+            "test_nll": test_nll,
+            "n_train_trials": n_train,
+            "n_test_trials": n_test,
+        }
+        for w in test_windows
+    ]
+    return fold, train_nll, test_nll, test_windows, records
 
 
 class VanillaRNNModel(nn.Module):
@@ -597,8 +650,6 @@ class VanillaRNNFit2Arm:
 
         return segments
 
-    # ------------------------------------------------------------------
-
     def _total_nll(self):
         """Forward pass through all segments; return total NLL and trial count."""
         total_nll = torch.tensor(0.0, device=self.device)
@@ -609,8 +660,6 @@ class VanillaRNNFit2Arm:
             total_nll = total_nll + F.cross_entropy(logits, y_seq, reduction="sum")
             n_trials += len(y_seq)
         return total_nll, n_trials
-
-    # ------------------------------------------------------------------
 
     def fit(
         self,
@@ -690,6 +739,7 @@ class VanillaRNNFit2Arm:
         lr_min: float = 1e-5,
         seed: int = None,
         progress_bar: bool = False,
+        n_jobs: int = None,
     ) -> pd.DataFrame:
         """K-fold cross-validation using windows as the split unit.
 
@@ -714,6 +764,15 @@ class VanillaRNNFit2Arm:
             Random seed for reproducible fold assignment.
         progress_bar : bool
             Show per-epoch tqdm bar for each fold.
+        n_jobs : int or None
+            Number of parallel worker processes.  ``None`` (default) reads
+            ``SLURM_CPUS_PER_TASK`` / ``SLURM_JOB_CPUS_PER_NODE`` and falls
+            back to 1 when neither is set.  Values > 1 launch each fold in a
+            separate process via ``ProcessPoolExecutor``; each worker sets
+            ``torch.set_num_threads(1)`` to avoid intra-op thread contention.
+            Workers are clamped to ``k`` so you never spawn more processes than
+            folds.  Parallel execution is only beneficial for CPU — avoid with
+            ``device="cuda"``.
 
         Returns
         -------
@@ -745,65 +804,77 @@ class VanillaRNNFit2Arm:
             fold_assignments = np.empty(n_windows, dtype=int)
             fold_assignments[perm] = np.arange(n_windows) % k
 
-        records = []
+        # Pre-build per-fold task splits (cheap — numpy ops only)
+        fold_args = []
         for fold in range(k):
             test_mask = fold_assignments == fold
             test_windows = window_ids[test_mask]
             train_windows = window_ids[~test_mask]
-
-            # Build task masks
-            train_trial_mask = np.isin(self.task.window_ids, train_windows)
-            test_trial_mask = np.isin(self.task.window_ids, test_windows)
-
-            train_task = self.task._filtered(train_trial_mask)
-            test_task = self.task._filtered(test_trial_mask)
-
-            # Fresh model for this fold
-            fold_fitter = VanillaRNNFit2Arm(
-                task=train_task,
-                hidden_size=self.model.hidden_size,
-                segment_starts="window",
-                device=self.device,
+            train_task = self.task._filtered(
+                np.isin(self.task.window_ids, train_windows)
             )
-            fold_fitter.fit(
-                n_epochs=n_epochs,
-                lr=lr,
-                lr_min=lr_min,
-                progress_bar=progress_bar,
-            )
+            test_task = self.task._filtered(np.isin(self.task.window_ids, test_windows))
+            fold_args.append((fold, train_task, test_task, test_windows))
 
-            train_nll = fold_fitter.nll_per_trial
-            n_train = train_task.n_trials
+        device_str = str(self.device)
+        hidden_size = self.model.hidden_size
+        if n_jobs is None:
+            n_jobs = _get_slurm_cpus(default=1)
+        workers = max(1, min(n_jobs, k))
+        print(f"Using {workers} worker(s) for {k}-fold CV")
 
-            # Evaluate on held-out windows using the fitted model (no gradient)
-            test_fitter = VanillaRNNFit2Arm(
-                task=test_task,
-                hidden_size=self.model.hidden_size,
-                segment_starts="window",
-                device=self.device,
-            )
-            test_fitter.model.load_state_dict(fold_fitter.model.state_dict())
-            test_nll = test_fitter.nll_per_trial
-            n_test = test_task.n_trials
-
-            print(
-                f"  Fold {fold + 1}/{k} — "
-                f"train NLL/trial: {train_nll:.4f}, "
-                f"test NLL/trial: {test_nll:.4f} "
-                f"(test windows: {test_windows.tolist()})"
-            )
-
-            for w in test_windows:
-                records.append(
-                    {
-                        "fold": fold,
-                        "window_id": w,
-                        "train_nll": train_nll,
-                        "test_nll": test_nll,
-                        "n_train_trials": n_train,
-                        "n_test_trials": n_test,
-                    }
+        records = []
+        if workers == 1:
+            # Sequential path — identical behaviour to before
+            for fold, train_task, test_task, test_windows in fold_args:
+                _, train_nll, test_nll, test_windows, fold_records = _run_fold(
+                    fold,
+                    train_task,
+                    test_task,
+                    test_windows,
+                    hidden_size,
+                    device_str,
+                    n_epochs,
+                    lr,
+                    lr_min,
+                    progress_bar,
                 )
+                print(
+                    f"  Fold {fold + 1}/{k} — "
+                    f"train NLL/trial: {train_nll:.4f}, "
+                    f"test NLL/trial: {test_nll:.4f} "
+                    f"(test windows: {test_windows.tolist()})"
+                )
+                records.extend(fold_records)
+        else:
+            # Parallel path
+            futures = {}
+            with ProcessPoolExecutor(max_workers=workers) as pool:
+                for fold, train_task, test_task, test_windows in fold_args:
+                    fut = pool.submit(
+                        _run_fold,
+                        fold,
+                        train_task,
+                        test_task,
+                        test_windows,
+                        hidden_size,
+                        device_str,
+                        n_epochs,
+                        lr,
+                        lr_min,
+                        progress_bar,
+                    )
+                    futures[fut] = fold
+
+                for fut in as_completed(futures):
+                    fold, train_nll, test_nll, test_windows, fold_records = fut.result()
+                    print(
+                        f"  Fold {fold + 1}/{k} — "
+                        f"train NLL/trial: {train_nll:.4f}, "
+                        f"test NLL/trial: {test_nll:.4f} "
+                        f"(test windows: {test_windows.tolist()})"
+                    )
+                    records.extend(fold_records)
 
         df = pd.DataFrame(records)
         mean_test = df["test_nll"].mean()
