@@ -884,11 +884,24 @@ class VanillaRNNFit2Arm:
 
     def save(self, path: str):
         checkpoint = {
+            # --- model ---
             "model_state_dict": self.model.state_dict(),
-            "nll_history": self.nll_history,
             "hidden_size": self.model.hidden_size,
             "input_size": self.model.input_size,
             "num_actions": self.model.num_actions,
+            # --- training diagnostics ---
+            "nll_history": self.nll_history,
+            "nll_per_trial": self.nll_per_trial,
+            # --- segmentation ---
+            "seg_mask": self._seg_mask,  # bool array, shape (n_trials,)
+            # --- task related (for alignment in downstream analyses) ---
+            "choices": self.task.choices,
+            "rewards": self.task.rewards,
+            "session_ids": self.task.session_ids,
+            "block_ids": self.task.block_ids,
+            "window_ids": self.task.window_ids,
+            # --- model output ---
+            "predict_proba": self.predict_proba(),  # (n_trials, n_actions)
         }
         torch.save(checkpoint, path)
         print(f"Saved to {path}")
@@ -899,10 +912,13 @@ class VanillaRNNFit2Arm:
         fitter = VanillaRNNFit2Arm(
             task=task,
             hidden_size=checkpoint["hidden_size"],
-            segment_starts=segment_starts,
+            segment_starts=checkpoint.get("seg_mask", segment_starts),
             device=device,
         )
         fitter.model.load_state_dict(checkpoint["model_state_dict"])
         fitter.model.eval()
         fitter.nll_history = checkpoint.get("nll_history", [])
+        # Restore cached outputs so callers don't need to recompute
+        fitter._loaded_nll_per_trial = checkpoint.get("nll_per_trial", None)
+        fitter._loaded_predict_proba = checkpoint.get("predict_proba", None)
         return fitter
