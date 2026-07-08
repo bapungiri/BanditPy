@@ -882,7 +882,7 @@ class VanillaRNNFit2Arm:
         print(f"\n{k}-fold CV — mean test NLL/trial: {mean_test:.4f} ± {std_test:.4f}")
         return df
 
-    def save(self, path: str):
+    def save(self, path: str, extra: dict = None):
         checkpoint = {
             # --- model ---
             "model_state_dict": self.model.state_dict(),
@@ -902,6 +902,8 @@ class VanillaRNNFit2Arm:
             "window_ids": self.task.window_ids,
             # --- model output ---
             "predict_proba": self.predict_proba(),  # (n_trials, n_actions)
+            # --- user-supplied extras (cv_results, metadata, etc.) ---
+            "extra": extra if extra is not None else {},
         }
         torch.save(checkpoint, path)
         print(f"Saved to {path}")
@@ -921,4 +923,5 @@ class VanillaRNNFit2Arm:
         # Restore cached outputs so callers don't need to recompute
         fitter._loaded_nll_per_trial = checkpoint.get("nll_per_trial", None)
         fitter._loaded_predict_proba = checkpoint.get("predict_proba", None)
+        fitter.extra = checkpoint.get("extra", {})
         return fitter
