@@ -730,6 +730,218 @@ class VanillaRNNFit2Arm:
                 all_probs.append(probs.cpu().numpy())
         return np.concatenate(all_probs, axis=0)
 
+    def simulate_posterior_predictive(
+        self, seed: int = None, return_hidden: bool = False
+    ):
+        """Run the fitted RNN autoregressively through the actual task structure.
+
+        Mirrors ``DecisionModel.simulate_posterior_predictive``: choices are
+        sampled from the model's policy at each trial; rewards are drawn from
+        ``self.task.probs``.  The hidden state resets at every segment boundary
+        (same ``_seg_mask`` used during fitting).
+
+        Parameters
+        ----------
+        seed : int, optional
+            RNG seed for reproducibility.
+        return_hidden : bool
+            If True, also return the hidden-state trajectory.
+
+        Returns
+        -------
+        Bandit2Arm
+            Simulated task with the same structure (probs, session/block/window
+            IDs, timestamps) as the original but with model-generated choices
+            and rewards.
+        np.ndarray, shape (n_trials, hidden_size)
+            Hidden state at each trial (only when ``return_hidden=True``).
+        """
+        rng = np.random.default_rng(seed)
+        task = self.task
+        n_trials = task.n_trials
+        n_ports = self.n_ports
+        input_size = n_ports + 1
+
+        choices_sim = np.zeros(n_trials, dtype=int)
+        rewards_sim = np.zeros(n_trials, dtype=int)
+        if return_hidden:
+            hidden_traj = np.zeros((n_trials, self.model.hidden_size))
+
+        self.model.eval()
+        hidden = None
+        prev_choice = 0  # 0 = no previous trial (1-indexed choices)
+        prev_reward = 0.0
+
+        with torch.no_grad():
+            for t in range(n_trials):
+                if self._seg_mask[t]:
+                    hidden = None
+                    prev_choice = 0
+                    prev_reward = 0.0
+
+                # l_t = [one-hot(a_{t-1}), r_{t-1}]; l_0 = zeros
+                x = torch.zeros(1, 1, input_size, device=self.device)
+                if prev_choice > 0:
+                    x[0, 0, prev_choice - 1] = 1.0  # one-hot (0-indexed)
+                    x[0, 0, n_ports] = prev_reward
+
+                logits, _, hidden = self.model(x, hidden)  # (1,1,n_actions)
+                probs = F.softmax(logits[0, 0], dim=-1)  # (n_actions,)
+                choice = torch.multinomial(probs, num_samples=1).item() + 1  # 1-indexed
+
+                reward = int(rng.random() < task.probs[t, choice - 1])
+
+                choices_sim[t] = choice
+                rewards_sim[t] = reward
+                if return_hidden:
+                    hidden_traj[t] = hidden[0, 0].cpu().numpy()
+
+                prev_choice = choice
+                prev_reward = float(reward)
+
+        sim_task = core.Bandit2Arm(
+            probs=task.probs.copy(),
+            choices=choices_sim,
+            rewards=rewards_sim,
+            session_ids=task.session_ids.copy(),
+            block_ids=None if task.block_ids is None else task.block_ids.copy(),
+            window_ids=None if task.window_ids is None else task.window_ids.copy(),
+            starts=None if task.starts is None else task.starts.copy(),
+            stops=None if task.stops is None else task.stops.copy(),
+            datetime=None if task.datetime is None else task.datetime.copy(),
+        )
+        if return_hidden:
+            return sim_task, hidden_traj
+        return sim_task
+
+    def simulate(
+        self,
+        reward_schedule,
+        min_trials_per_block: int = 100,
+        prob_switch: float = 0.02,
+        max_trials_per_block: int = 500,
+        n_block_min: int = 4,
+        n_block_max: int = 8,
+        seed: int = None,
+        return_hidden: bool = True,
+    ):
+        """Simulate the fitted RNN on a new reward schedule.
+
+        The hidden state resets at window boundaries (random lengths drawn
+        from ``[n_block_min, n_block_max]`` sessions), matching the convention
+        used during training.
+
+        Parameters
+        ----------
+        reward_schedule : array-like, shape (N, 2)
+            Reward probabilities per arm for each of N sessions.
+        min_trials_per_block : int
+            Minimum trials before a session can end.
+        prob_switch : float
+            Per-trial probability of ending the session after
+            ``min_trials_per_block``.
+        max_trials_per_block : int
+            Hard cap on session length.
+        n_block_min, n_block_max : int
+            Range of window lengths (in sessions) for hidden-state resets.
+        seed : int, optional
+            RNG seed for reproducibility.
+        return_hidden : bool
+            If True (default), also return the hidden-state trajectory.
+
+        Returns
+        -------
+        Bandit2Arm
+            Simulated task with probs, choices, rewards, and session/block/
+            window IDs.
+        np.ndarray, shape (n_trials, hidden_size)
+            Hidden state at each trial (only when ``return_hidden=True``).
+        """
+        reward_schedule = np.asarray(reward_schedule)
+        assert (
+            reward_schedule.ndim == 2 and reward_schedule.shape[1] == 2
+        ), "reward_schedule must be shape (N, 2)"
+
+        rng = np.random.default_rng(seed)
+        n_sessions = reward_schedule.shape[0]
+        n_ports = self.n_ports
+        input_size = n_ports + 1
+
+        # Window boundaries: hidden state resets
+        window_starts = set()
+        idx = 0
+        while idx < n_sessions:
+            window_starts.add(idx)
+            idx += int(rng.integers(n_block_min, n_block_max + 1))
+
+        all_probs, all_choices, all_rewards = [], [], []
+        all_session_ids, all_block_ids, all_window_ids = [], [], []
+        if return_hidden:
+            all_hidden = []
+
+        self.model.eval()
+        hidden = None
+        window_id = 0
+        block_id_in_window = 0
+
+        with torch.no_grad():
+            for session_idx in range(n_sessions):
+                if session_idx in window_starts:
+                    hidden = None
+                    window_id += 1
+                    block_id_in_window = 0
+
+                block_probs = reward_schedule[session_idx]
+                block_id_in_window += 1
+
+                prev_choice = 0
+                prev_reward = 0.0
+                trial = 0
+
+                while True:
+                    x = torch.zeros(1, 1, input_size, device=self.device)
+                    if prev_choice > 0:
+                        x[0, 0, prev_choice - 1] = 1.0
+                        x[0, 0, n_ports] = prev_reward
+
+                    logits, _, hidden = self.model(x, hidden)
+                    probs = F.softmax(logits[0, 0], dim=-1)
+                    choice = torch.multinomial(probs, num_samples=1).item() + 1
+
+                    reward = int(rng.random() < block_probs[choice - 1])
+
+                    all_probs.append(block_probs.copy())
+                    all_choices.append(choice)
+                    all_rewards.append(reward)
+                    all_session_ids.append(session_idx + 1)
+                    all_block_ids.append(block_id_in_window)
+                    all_window_ids.append(window_id)
+                    if return_hidden:
+                        all_hidden.append(hidden[0, 0].cpu().numpy())
+
+                    prev_choice = choice
+                    prev_reward = float(reward)
+                    trial += 1
+
+                    if trial >= min_trials_per_block and (
+                        rng.random() < prob_switch or trial >= max_trials_per_block
+                    ):
+                        break
+
+                hidden = hidden.detach()
+
+        sim_task = core.Bandit2Arm(
+            probs=np.array(all_probs),
+            choices=np.array(all_choices, dtype=int),
+            rewards=np.array(all_rewards, dtype=int),
+            session_ids=np.array(all_session_ids, dtype=int),
+            block_ids=np.array(all_block_ids, dtype=int),
+            window_ids=np.array(all_window_ids, dtype=int),
+        )
+        if return_hidden:
+            return sim_task, np.vstack(all_hidden)
+        return sim_task
+
     def cross_validate(
         self,
         k: int = 5,
@@ -895,6 +1107,7 @@ class VanillaRNNFit2Arm:
             # --- segmentation ---
             "seg_mask": self._seg_mask,  # bool array, shape (n_trials,)
             # --- task related (for alignment in downstream analyses) ---
+            "probs": self.task.probs,
             "choices": self.task.choices,
             "rewards": self.task.rewards,
             "session_ids": self.task.session_ids,
@@ -909,12 +1122,29 @@ class VanillaRNNFit2Arm:
         print(f"Saved to {path}")
 
     @staticmethod
-    def load(path: str, task: core.Bandit2Arm, segment_starts="session", device="cpu"):
-        checkpoint = torch.load(path, map_location=device)
+    def load(path: str, device="cpu"):
+        checkpoint = torch.load(path, map_location=device, weights_only=False)
+
+        # Reconstruct task from saved arrays.
+        # Older checkpoints did not save probs; fall back to dummy zeros.
+        choices = checkpoint["choices"]
+        probs = checkpoint.get(
+            "probs",
+            np.zeros((len(choices), checkpoint["num_actions"]), dtype=np.float32),
+        )
+        task = core.Bandit2Arm(
+            probs=probs,
+            choices=choices,
+            rewards=checkpoint["rewards"],
+            session_ids=checkpoint["session_ids"],
+            block_ids=checkpoint.get("block_ids"),
+            window_ids=checkpoint.get("window_ids"),
+        )
+
         fitter = VanillaRNNFit2Arm(
             task=task,
             hidden_size=checkpoint["hidden_size"],
-            segment_starts=checkpoint.get("seg_mask", segment_starts),
+            segment_starts=checkpoint["seg_mask"],
             device=device,
         )
         fitter.model.load_state_dict(checkpoint["model_state_dict"])
