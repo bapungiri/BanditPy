@@ -165,9 +165,9 @@ class QlearnHierarchical2Arm(BasePolicy):
 
     A meta-controller mixes two option policies. Each option holds its own
     action values; the meta-controller maintains option values. Action
-    probabilities are a mixture of option policies, with ``beta_meta`` and
-    ``beta_option`` controlling exploration at each level. ``logits()``
-    returns log-probabilities, so this policy uses ``NoBeta`` by default.
+    probabilities are a mixture of option policies, with 'beta_meta' and
+    'beta_option' controlling exploration at each level. 'logits()'
+    returns log-probabilities, so this policy uses 'NoBeta' by default.
     Updates use soft responsibilities over options given the chosen action.
     """
 
@@ -271,8 +271,8 @@ class QlearnWM2Arm(BasePolicy):
     Action probabilities:
         p(a) = (1 - w) * softmax(beta_rl * Q_RL) + w * softmax(beta_wm * Q_WM)
 
-    ``beta_rl`` and ``beta_wm`` are internal parameters; the outer softmax
-    in ``DecisionModel`` should be neutralised by pairing with ``NoBeta()``.
+    'beta_rl' and 'beta_wm' are internal parameters; the outer softmax
+    in 'DecisionModel' should be neutralised by pairing with 'NoBeta()'.
 
     Reference
     ---------
@@ -377,11 +377,11 @@ class QlearnDynamicLR2Arm(BasePolicy):
         other = 1 - choice
         pe = reward - self.q[choice]
 
-        # Update learning rates based on prediction error
-        self.alpha_c += (
+        # Update learning rates based on prediction error (EWMA toward |pe|)
+        self.alpha_c = (
             self.params["w_c"] * abs(pe) + (1 - self.params["w_c"]) * self.alpha_c
         )
-        self.alpha_u += (
+        self.alpha_u = (
             self.params["w_u"] * abs(pe) + (1 - self.params["w_u"]) * self.alpha_u
         )
 
@@ -391,3 +391,79 @@ class QlearnDynamicLR2Arm(BasePolicy):
 
         # Clamp Q-values to [0, 1]
         np.clip(self.q, 0.0, 1.0, out=self.q)
+
+
+class QlearnMetaplasticity2Arm(BasePolicy):
+    """
+    2-arm Q-learning with a metaplastic, reward-history dependent learning rate.
+
+    Rather than scaling with PE magnitude (cf. 'QlearnDynamicLR2Arm'), the
+    learning rate drifts based on the *consistency* of consecutive
+    prediction errors: it rises when successive PEs share a sign (stable,
+    predictable feedback) and falls when successive PEs flip sign (volatile,
+    inconsistent feedback). This is a simplified take on the metaplasticity
+    mechanism proposed by Farashahi et al. (2017, Neuron), "Metaplasticity
+    as a neural substrate for adaptive learning and choice under
+    uncertainty" -- not a literal reimplementation of their equations.
+
+    Update rule:
+    pe = reward - Q[choice]
+    consistency = sign(pe) * sign(pe_prev)
+    alpha_c <- clip(alpha_c + kappa_c * consistency, 0, 1)
+    alpha_u <- clip(alpha_u + kappa_u * consistency, 0, 1)
+    Q[choice] += alpha_c * pe
+    Q[unchosen] += alpha_u * pe
+    """
+
+    class Params(ParameterGroup):
+        alpha_c0 = ParameterSpec(
+            "alpha_c0",
+            (0.0, 1.0),
+            description="Initial/baseline learning rate for chosen option",
+        )
+        alpha_u0 = ParameterSpec(
+            "alpha_u0",
+            (0.0, 1.0),
+            description="Initial/baseline learning rate for unchosen option",
+        )
+        kappa_c = ParameterSpec(
+            "kappa_c",
+            (0.0, 0.5),
+            description="Metaplastic adaptation rate for chosen learning rate",
+        )
+        kappa_u = ParameterSpec(
+            "kappa_u",
+            (0.0, 0.5),
+            description="Metaplastic adaptation rate for unchosen learning rate",
+        )
+
+    def reset(self):
+        self.q = np.full(2, 0.5)
+        self.alpha_c = self.params["alpha_c0"]
+        self.alpha_u = self.params["alpha_u0"]
+        self.pe_prev = 0.0
+
+    def forget(self):
+        pass
+
+    def logits(self):
+        return self.q.copy()
+
+    def update(self, choice, reward):
+        other = 1 - choice
+        pe = reward - self.q[choice]
+
+        consistency = np.sign(pe) * np.sign(self.pe_prev)
+
+        self.alpha_c = np.clip(
+            self.alpha_c + self.params["kappa_c"] * consistency, 0.0, 1.0
+        )
+        self.alpha_u = np.clip(
+            self.alpha_u + self.params["kappa_u"] * consistency, 0.0, 1.0
+        )
+
+        self.q[choice] += self.alpha_c * pe
+        self.q[other] += self.alpha_u * pe
+        np.clip(self.q, 0.0, 1.0, out=self.q)
+
+        self.pe_prev = pe
