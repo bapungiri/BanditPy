@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 from scipy.special import logsumexp
 from banditpy.core import Bandit2Arm
 from .policy.base import BasePolicy
@@ -7,19 +8,21 @@ import os
 from .optim import resolve_optimizer
 
 
-def softmax_loglik(logits, choice, beta, epsilon=0.0):
-    z = beta * logits
-    p = np.exp(z[choice] - logsumexp(z))
-    if epsilon > 0:
-        p = (1 - epsilon) * p + epsilon / len(logits)
-    return np.log(p + 1e-12)
-
-
-def softmax_sample(logits, beta, rng, epsilon=0.0):
+def _softmax_probs(logits, beta, epsilon=0.0):
     z = beta * logits
     p = np.exp(z - logsumexp(z))
     if epsilon > 0:
         p = (1 - epsilon) * p + epsilon / len(p)
+    return p
+
+
+def softmax_loglik(logits, choice, beta, epsilon=0.0):
+    p = _softmax_probs(logits, beta, epsilon)
+    return np.log(p[choice] + 1e-12)
+
+
+def softmax_sample(logits, beta, rng, epsilon=0.0):
+    p = _softmax_probs(logits, beta, epsilon)
     return rng.choice(len(p), p=p)
 
 
@@ -31,6 +34,158 @@ def _get_slurm_cpus(default=1):
             except ValueError:
                 pass
     return default
+
+
+def _logit_dynamics_dataframe(
+    probs,
+    choices,
+    rewards,
+    reset_mask,
+    n_bins=15,
+    logit_range=(-5.0, 5.0),
+    min_trials_per_bin=5,
+):
+    """Conditional "logit-change" dynamics, as in Li et al., *Discovering
+    cognitive strategies with tiny recurrent neural networks*.
+
+    Shared by any fitted model that can produce a per-trial ``(n_trials, 2)``
+    choice-probability array: ``logit_t = log(p1_t / p2_t)`` (teacher-forced
+    on the real observed history) is binned by the action actually taken and
+    the reward actually received at trial ``t`` (4 conditions: A1/R0, A1/R1,
+    A2/R0, A2/R1). Transitions that cross a reset boundary (``reset_mask``)
+    are excluded since ``logit_{t+1}`` would not be a genuine continuation.
+
+    Parameters
+    ----------
+    probs : np.ndarray, shape (n_trials, 2)
+        Model choice probabilities, teacher-forced on the real history.
+    choices : np.ndarray, shape (n_trials,)
+        1-indexed observed choice per trial.
+    rewards : np.ndarray, shape (n_trials,)
+        Observed reward per trial.
+    reset_mask : np.ndarray of bool, shape (n_trials,)
+        True at trial indices where the model's internal state was reset
+        (session/block/window start).
+    n_bins : int
+        Number of bins spanning ``logit_range``.
+    logit_range : (float, float)
+        Lower/upper bound of the logit axis.
+    min_trials_per_bin : int
+        Bins with fewer than this many trials are dropped.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``bin_center``, ``action`` (1 or 2), ``reward`` (0 or 1),
+        ``mean_change``, ``sem_change``, ``n``.
+    """
+    probs = np.clip(probs, 1e-6, 1 - 1e-6)
+    logit = np.log(probs[:, 0] / probs[:, 1])  # prefer A1 > 0, prefer A2 < 0
+
+    valid = ~np.asarray(reset_mask, dtype=bool)[1:]
+
+    logit_t = logit[:-1][valid]
+    logit_t1 = logit[1:][valid]
+    change = logit_t1 - logit_t
+    action_t = np.asarray(choices)[:-1][valid]
+    reward_t = np.asarray(rewards)[:-1][valid]
+
+    edges = np.linspace(logit_range[0], logit_range[1], n_bins + 1)
+    bin_centers = 0.5 * (edges[:-1] + edges[1:])
+    bin_idx = np.clip(np.digitize(logit_t, edges) - 1, 0, n_bins - 1)
+
+    records = []
+    for a in (1, 2):
+        for r in (0, 1):
+            cond = (action_t == a) & (reward_t == r)
+            for b in range(n_bins):
+                sel = cond & (bin_idx == b)
+                n = int(sel.sum())
+                if n < min_trials_per_bin:
+                    continue
+                records.append(
+                    {
+                        "bin_center": bin_centers[b],
+                        "action": a,
+                        "reward": r,
+                        "mean_change": change[sel].mean(),
+                        "sem_change": (
+                            change[sel].std(ddof=1) / np.sqrt(n) if n > 1 else np.nan
+                        ),
+                        "n": n,
+                    }
+                )
+    return pd.DataFrame.from_records(records)
+
+
+def _plot_logit_dynamics_ax(df, ax=None):
+    """Plot the conditional logit-change dynamics (see
+    ``_logit_dynamics_dataframe``).
+
+    Reproduces the style of Li et al.'s dynamical-portrait figure: one line
+    per (action, reward) condition, colored by action and shaded by reward
+    outcome. Where ``df`` has a ``sem_change`` column, a shaded band of
+    +/- 1 SEM is drawn around each line (bins with a NaN SEM, e.g. a single
+    contributing trial/animal, are drawn with zero band width).
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Output of ``_logit_dynamics_dataframe``.
+    ax : matplotlib.axes.Axes, optional
+
+    Returns
+    -------
+    matplotlib.axes.Axes
+    """
+    import matplotlib.pyplot as plt
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(4, 4))
+
+    colors = {1: "tab:blue", 2: "tab:red"}
+    alphas = {0: 0.4, 1: 1.0}
+    labels = {
+        (1, 0): "A1, R=0",
+        (1, 1): "A1, R=1",
+        (2, 0): "A2, R=0",
+        (2, 1): "A2, R=1",
+    }
+    has_sem = "sem_change" in df.columns
+
+    for a in (1, 2):
+        for r in (0, 1):
+            sub = df[(df["action"] == a) & (df["reward"] == r)].sort_values(
+                "bin_center"
+            )
+            if sub.empty:
+                continue
+            ax.plot(
+                sub["bin_center"],
+                sub["mean_change"],
+                color=colors[a],
+                alpha=alphas[r],
+                marker="o",
+                ms=3,
+                label=labels[(a, r)],
+            )
+            if has_sem and sub["sem_change"].notna().any():
+                sem = sub["sem_change"].fillna(0.0)
+                ax.fill_between(
+                    sub["bin_center"],
+                    sub["mean_change"] - sem,
+                    sub["mean_change"] + sem,
+                    color=colors[a],
+                    alpha=0.15,
+                    linewidth=0,
+                )
+
+    ax.axhline(0, color="k", lw=0.8, alpha=0.5)
+    ax.axvline(0, color="k", lw=0.8, alpha=0.5)
+    ax.set_xlabel("Logit  (Prefer A2 <- 0 -> Prefer A1)")
+    ax.set_ylabel("Logit change")
+    ax.legend(fontsize=8, frameon=False)
+    return ax
 
 
 class DecisionModel:
@@ -195,6 +350,40 @@ class DecisionModel:
             self.beta_schedule.update()
 
         return trial_nlls
+
+    def predict_proba(self) -> np.ndarray:
+        """Choice probabilities for every trial in the original trial order.
+
+        Teacher-forced on the real observed choice/reward history, mirroring
+        ``get_trial_nll()``'s trial loop.
+
+        Returns
+        -------
+        np.ndarray, shape (n_trials, 2)
+            Softmax choice probabilities.
+        """
+        self.policy.set_params(self.params)
+        self.policy.reset()
+        self.beta_schedule.reset()
+
+        probs = np.zeros((len(self.choices), 2))
+
+        for t, (c, r, reset) in enumerate(zip(self.choices, self.rewards, self.resets)):
+            if reset:
+                self.policy.reset()
+                self.beta_schedule.reset()
+            else:
+                self.policy.forget()
+
+            probs[t] = _softmax_probs(
+                self.policy.logits(),
+                self.beta_schedule.get_beta(),
+                self.beta_schedule.get_epsilon(),
+            )
+            self.policy.update(c, r)
+            self.beta_schedule.update()
+
+        return probs
 
     # -------------------- FIT --------------------
 
@@ -449,6 +638,37 @@ class DecisionModel:
             self.policy.update(choice, r)
 
         return np.array(choices)
+
+    # -------------------- LOGIT DYNAMICS --------------------
+
+    def compute_logit_dynamics(
+        self,
+        n_bins: int = 15,
+        logit_range=(-5.0, 5.0),
+        min_trials_per_bin: int = 5,
+    ) -> pd.DataFrame:
+        """Conditional "logit-change" dynamics, as in Li et al., *Discovering
+        cognitive strategies with tiny recurrent neural networks*.
+
+        See ``VanillaRNNFit2Arm.compute_logit_dynamics`` for the full
+        description; this is the same analysis applied to this policy's
+        fitted choice probabilities (``predict_proba()``).
+        """
+        return _logit_dynamics_dataframe(
+            self.predict_proba(),
+            self.task.choices,
+            self.task.rewards,
+            self.resets,
+            n_bins=n_bins,
+            logit_range=logit_range,
+            min_trials_per_bin=min_trials_per_bin,
+        )
+
+    def plot_logit_dynamics(self, ax=None, n_bins: int = 15, logit_range=(-5.0, 5.0)):
+        """Plot the conditional logit-change dynamics (see
+        ``compute_logit_dynamics``)."""
+        df = self.compute_logit_dynamics(n_bins=n_bins, logit_range=logit_range)
+        return _plot_logit_dynamics_ax(df, ax=ax)
 
     # -------------------- METRICS / OUTPUT --------------------
 
