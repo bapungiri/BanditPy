@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from .. import core
-from .model import _get_slurm_cpus
+from .model import _get_slurm_cpus, _logit_dynamics_dataframe, _plot_logit_dynamics_ax
 
 
 def _run_fold(
@@ -713,6 +713,17 @@ class VanillaRNNFit2Arm:
             total_nll, n_trials = self._total_nll()
         return (total_nll / n_trials).item()
 
+    @property
+    def predictive_accuracy(self) -> float:
+        """Geometric mean probability assigned to the animal's actual choice,
+        i.e. ``exp(-nll_per_trial)``.
+
+        Unlike ``accuracy()`` (a hard argmax-match rate), this is a soft,
+        likelihood-derived score in [0, 1] — the same quantity commonly
+        reported as "predictive accuracy" in RNN behavioural-fitting papers.
+        """
+        return float(np.exp(-self.nll_per_trial))
+
     def predict_proba(self) -> np.ndarray:
         """Choice probabilities for every trial in the original trial order.
 
@@ -729,6 +740,118 @@ class VanillaRNNFit2Arm:
                 probs = F.softmax(logits.squeeze(0), dim=-1)  # (T, n_actions)
                 all_probs.append(probs.cpu().numpy())
         return np.concatenate(all_probs, axis=0)
+
+    def predict_choices(self, stochastic: bool = False) -> np.ndarray:
+        """Predicted choice for every trial, 1-indexed to match ``task.choices``.
+
+        Parameters
+        ----------
+        stochastic : bool, optional (default=False)
+            If True, samples a choice from the softmax distribution at each
+            trial. If False, uses the highest-probability action (argmax).
+
+        Returns
+        -------
+        np.ndarray, shape (n_trials,)
+            Predicted choice (1-indexed) for each trial.
+        """
+        probs = self.predict_proba()
+        if stochastic:
+            rng = np.random.default_rng()
+            return np.array([rng.choice(self.n_ports, p=p) + 1 for p in probs])
+        return probs.argmax(axis=1) + 1
+
+    def accuracy(self, stochastic: bool = False) -> float:
+        """Fraction of trials where the predicted choice matches the animal's
+        actual choice.
+
+        Parameters
+        ----------
+        stochastic : bool, optional (default=False)
+            Passed to ``predict_choices()``.
+
+        Returns
+        -------
+        float
+            Accuracy in [0, 1].
+        """
+        predicted = self.predict_choices(stochastic=stochastic)
+        return float((predicted == self.task.choices).mean())
+
+    def compute_logit_dynamics(
+        self,
+        n_bins: int = 15,
+        logit_range=(-5.0, 5.0),
+        min_trials_per_bin: int = 5,
+    ) -> pd.DataFrame:
+        """Conditional "logit-change" dynamics, as in Li et al., *Discovering
+        cognitive strategies with tiny recurrent neural networks*.
+
+        For every trial ``t`` define the model's preference for action 1 as
+        ``logit_t = log(p1_t / p2_t)`` (teacher-forced on the real observed
+        history, i.e. ``predict_proba()``).  The one-step update
+
+            ``logit_change_t = logit_{t+1} - logit_t``
+
+        is grouped by the action actually taken and the reward actually
+        received at trial ``t`` (4 conditions: A1/R0, A1/R1, A2/R0, A2/R1)
+        and averaged within bins of ``logit_t``.  Transitions that cross a
+        segment boundary (hidden state reset) are excluded since ``logit_{t+1}``
+        would not be a genuine continuation of trial ``t``.
+
+        Parameters
+        ----------
+        n_bins : int
+            Number of bins spanning ``logit_range``.
+        logit_range : (float, float)
+            Lower/upper bound of the logit axis.
+        min_trials_per_bin : int
+            Bins with fewer than this many trials are dropped (avoids noisy
+            single-trial estimates, especially at extreme logit values that
+            are rarely visited in real behavior).
+
+        Returns
+        -------
+        pd.DataFrame
+            Columns: ``bin_center``, ``action`` (1 or 2), ``reward`` (0 or 1),
+            ``mean_change``, ``sem_change``, ``n``.
+
+        Notes
+        -----
+        Real behavior often under-samples extreme logit values.  For denser,
+        smoother curves, fit a fresh ``VanillaRNNFit2Arm`` on a simulated task
+        (e.g. ``fit.simulate(reward_schedule=...)``), load this model's state
+        dict into it, and call ``compute_logit_dynamics()`` on that instead.
+        """
+        return _logit_dynamics_dataframe(
+            self.predict_proba(),
+            self.task.choices,
+            self.task.rewards,
+            self._seg_mask,
+            n_bins=n_bins,
+            logit_range=logit_range,
+            min_trials_per_bin=min_trials_per_bin,
+        )
+
+    def plot_logit_dynamics(self, ax=None, n_bins: int = 15, logit_range=(-5.0, 5.0)):
+        """Plot the conditional logit-change dynamics (see ``compute_logit_dynamics``).
+
+        Reproduces the style of Li et al.'s dynamical-portrait figure: one
+        line per (action, reward) condition, colored by action and shaded by
+        reward outcome.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes, optional
+        n_bins, logit_range
+            Passed to ``compute_logit_dynamics``.
+
+        Returns
+        -------
+        matplotlib.axes.Axes
+        """
+        df = self.compute_logit_dynamics(n_bins=n_bins, logit_range=logit_range)
+        return _plot_logit_dynamics_ax(df, ax=ax)
 
     def simulate_posterior_predictive(
         self, seed: int = None, return_hidden: bool = False
