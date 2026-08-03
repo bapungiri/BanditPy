@@ -22,6 +22,8 @@ class StateInference2Arm(BasePolicy):
             "b0", (0.0, 1.0), default=0.5, description="Initial belief P(s=0)"
         )
 
+    params: Params
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 

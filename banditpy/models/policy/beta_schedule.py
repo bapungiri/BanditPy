@@ -108,6 +108,8 @@ class StaticBeta(BetaSchedule):
             description="Lapse rate (probability of random choice)",
         )
 
+    params: Params
+
     def get_beta(self) -> float:
         return float(self.params["beta"])
 
@@ -147,6 +149,8 @@ class ExponentialBeta(BetaSchedule):
             active=False,
             description="Lapse rate (probability of random choice)",
         )
+
+    params: Params
 
     def __init__(self):
         super().__init__()
@@ -192,6 +196,8 @@ class LinearBeta(BetaSchedule):
             description="Lapse rate (probability of random choice)",
         )
 
+    params: Params
+
     def __init__(self):
         super().__init__()
         self._t: int = 0
@@ -235,6 +241,8 @@ class PowerLawBeta(BetaSchedule):
             active=False,
             description="Lapse rate (probability of random choice)",
         )
+
+    params: Params
 
     def __init__(self):
         super().__init__()
@@ -289,6 +297,8 @@ class PowerLaw10Beta(BetaSchedule):
             active=False,
             description="Lapse rate (probability of random choice)",
         )
+
+    params: Params
 
     def __init__(self):
         super().__init__()

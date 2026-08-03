@@ -90,6 +90,8 @@ class ThompsonShared2Arm(BaseThompson2Arm):
             "lr_unchosen", (0.0, 1.0), description="LR (unchosen arm)"
         )
 
+    params: Params
+
     def update(self, choice, reward):
         p = self.params
         other = 1 - choice
@@ -127,6 +129,8 @@ class ThompsonSplit2Arm(BaseThompson2Arm):
         lr_u_neg = ParameterSpec(
             "lr_u_neg", (0.0, 1.0), description="LR (unchosen arm, no reward)"
         )
+
+    params: Params
 
     def update(self, choice, reward):
         p = self.params
