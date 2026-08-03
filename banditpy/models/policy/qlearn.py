@@ -30,6 +30,8 @@ class Qlearn2Arm(BasePolicy):
             "alpha_u", (-0.99, 0.99), description="Learning rate for unchosen option"
         )
 
+    params: Params
+
     def reset(self):
         self.q = np.full(2, 0.5)
 
@@ -76,6 +78,8 @@ class QlearnBias2Arm(BasePolicy):
             "bias", (-2.0, 2.0), default=0.0, description="Bias toward port 0 vs port 1"
         )
 
+    params: Params
+
     def reset(self):
         self.q = np.full(2, 0.5)
 
@@ -113,6 +117,8 @@ class QlearnH2Arm(BasePolicy):
             "alpha_h", (0.0, 1.0), description="Perseverance learning"
         )
         scaler = ParameterSpec("scaler", (1, 10.0), description="Perseverance scale")
+
+    params: Params
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -197,6 +203,8 @@ class QlearnHierarchical2Arm(BasePolicy):
         beta_option = ParameterSpec(
             "beta_option", (0.1, 10.0), description="Inverse temp within options"
         )
+
+    params: Params
 
     def __init__(self, n_options: int = 2, **kwargs):
         super().__init__(**kwargs)
@@ -298,6 +306,8 @@ class QlearnWM2Arm(BasePolicy):
             "w0", (0.0, 1.0), default=0.5, description="Initial WM weight"
         )
 
+    params: Params
+
     def reset(self):
         self.q_rl = np.full(2, 0.5)
         self.q_wm = np.full(2, 0.5)
@@ -362,6 +372,8 @@ class QlearnDynamicLR2Arm(BasePolicy):
             description="Weight for unchosen option learning rate update",
         )
 
+    params: Params
+
     def reset(self):
         self.q = np.full(2, 0.5)
         self.alpha_c = self.params["alpha_c"]
@@ -393,24 +405,26 @@ class QlearnDynamicLR2Arm(BasePolicy):
         np.clip(self.q, 0.0, 1.0, out=self.q)
 
 
-class QlearnMetaplasticity2Arm(BasePolicy):
+class QlearnAdaptiveLR2Arm(BasePolicy):
     """
-    2-arm Q-learning with a metaplastic, reward-history dependent learning rate.
+    2-arm Q-learning with a reward-rate dependent adaptive learning rate.
 
-    Rather than scaling with PE magnitude (cf. 'QlearnDynamicLR2Arm'), the
-    learning rate drifts based on the *consistency* of consecutive
-    prediction errors: it rises when successive PEs share a sign (stable,
-    predictable feedback) and falls when successive PEs flip sign (volatile,
-    inconsistent feedback). This is a simplified take on the metaplasticity
-    mechanism proposed by Farashahi et al. (2017, Neuron), "Metaplasticity
-    as a neural substrate for adaptive learning and choice under
-    uncertainty" -- not a literal reimplementation of their equations.
+    The learning rate decreases as the recent (EWMA) reward rate rises,
+    capturing the idea that once reward has become reliably predictable
+    (e.g. the animal has settled on the better port), further updates
+    should shrink; a drop in reward rate raises the learning rate back up.
+    This is a simple scalar heuristic, not a reimplementation of any
+    specific published model.
+
+    Note that reward rate is a lagging indicator: right after a reversal
+    it stays high for a few trials before dropping, so the learning rate
+    is briefly slow to recover exactly when fast relearning matters most.
 
     Update rule:
+    r_bar <- r_bar + w_r * (reward - r_bar)
+    alpha_c <- clip(alpha_c0 - kappa_c * r_bar, 0, 1)
+    alpha_u <- clip(alpha_u0 - kappa_u * r_bar, 0, 1)
     pe = reward - Q[choice]
-    consistency = sign(pe) * sign(pe_prev)
-    alpha_c <- clip(alpha_c + kappa_c * consistency, 0, 1)
-    alpha_u <- clip(alpha_u + kappa_u * consistency, 0, 1)
     Q[choice] += alpha_c * pe
     Q[unchosen] += alpha_u * pe
     """
@@ -419,29 +433,36 @@ class QlearnMetaplasticity2Arm(BasePolicy):
         alpha_c0 = ParameterSpec(
             "alpha_c0",
             (0.0, 1.0),
-            description="Initial/baseline learning rate for chosen option",
+            description="Learning rate for chosen option at zero reward rate",
         )
         alpha_u0 = ParameterSpec(
             "alpha_u0",
-            (0.0, 1.0),
-            description="Initial/baseline learning rate for unchosen option",
+            (-0.99, 0.99),
+            description="Learning rate for unchosen option at zero reward rate",
         )
         kappa_c = ParameterSpec(
             "kappa_c",
-            (0.0, 0.5),
-            description="Metaplastic adaptation rate for chosen learning rate",
+            (0.0, 2.0),
+            description="Drop in chosen learning rate per unit reward rate",
         )
         kappa_u = ParameterSpec(
             "kappa_u",
-            (0.0, 0.5),
-            description="Metaplastic adaptation rate for unchosen learning rate",
+            (0.0, 2.0),
+            description="Drop in unchosen learning rate per unit reward rate",
         )
+        w_r = ParameterSpec(
+            "w_r",
+            (0.02, 0.5),
+            description="EWMA weight for the reward-rate trace",
+        )
+
+    params: Params
 
     def reset(self):
         self.q = np.full(2, 0.5)
+        self.r_bar = 0.5
         self.alpha_c = self.params["alpha_c0"]
         self.alpha_u = self.params["alpha_u0"]
-        self.pe_prev = 0.0
 
     def forget(self):
         pass
@@ -453,17 +474,15 @@ class QlearnMetaplasticity2Arm(BasePolicy):
         other = 1 - choice
         pe = reward - self.q[choice]
 
-        consistency = np.sign(pe) * np.sign(self.pe_prev)
+        self.r_bar += self.params["w_r"] * (reward - self.r_bar)
 
         self.alpha_c = np.clip(
-            self.alpha_c + self.params["kappa_c"] * consistency, 0.0, 1.0
+            self.params["alpha_c0"] - self.params["kappa_c"] * self.r_bar, 0.0, 1.0
         )
         self.alpha_u = np.clip(
-            self.alpha_u + self.params["kappa_u"] * consistency, 0.0, 1.0
+            self.params["alpha_u0"] - self.params["kappa_u"] * self.r_bar, -1.0, 1.0
         )
 
         self.q[choice] += self.alpha_c * pe
         self.q[other] += self.alpha_u * pe
         np.clip(self.q, 0.0, 1.0, out=self.q)
-
-        self.pe_prev = pe
