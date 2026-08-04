@@ -396,7 +396,7 @@ class QlearnAdaptiveLR(BasePolicy):
     class Params(ParameterGroup):
         alpha_c0 = ParameterSpec(
             "alpha_c0",
-            (0.0, 1.0),
+            (0.0, 0.99),
             description="Learning rate for chosen option at zero reward rate",
         )
         alpha_u0 = ParameterSpec(
