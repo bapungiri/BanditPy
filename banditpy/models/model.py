@@ -253,6 +253,52 @@ def _nll_core(
     return nll
 
 
+def _evaluate_core(policy, choices, rewards, resets, theta):
+    """One teacher-forced forward pass computing NLL and prediction accuracy
+    together. Mutates 'policy' (and its 'beta_schedule') in place — callers
+    that need isolation should pass a fresh/copied policy. A trial counts as
+    'correct' when the arm with the highest model probability matches the
+    observed choice (exact ties broken toward the lower-index arm, via
+    'np.argmax' — negligible in practice since a fitted 'bias'/asymmetry
+    term would have to land on exactly 0.0). No early stopping: this is only
+    ever called once per cross-validation fold, not inside the optimizer's
+    hot loop.
+    """
+    beta_schedule = policy.beta_schedule
+    policy_names = policy.active_parameter_names()
+    all_params = dict(zip(policy_names, theta))
+
+    for name, spec in policy.parameter_specs().items():
+        if name not in all_params:
+            all_params[name] = spec.default if spec.default is not None else 0.0
+
+    policy.set_params(all_params)
+    policy.reset()
+    beta_schedule.reset()
+
+    nll = 0.0
+    n_correct = 0
+
+    for c, r, reset in zip(choices, rewards, resets):
+        if reset:
+            policy.reset()
+            beta_schedule.reset()
+        else:
+            policy.forget()
+
+        probs = _softmax_probs(
+            policy.logits(), beta_schedule.get_beta(), beta_schedule.get_epsilon()
+        )
+        nll -= np.log(probs[c] + 1e-12)
+        if np.argmax(probs) == c:
+            n_correct += 1
+
+        policy.update(c, r)
+        beta_schedule.update()
+
+    return nll, n_correct
+
+
 def _fit_core(
     policy,
     choices,
@@ -367,6 +413,7 @@ class DecisionModel:
         self.cv_test_nll_ = None
         self.cv_test_nll_per_trial_ = None
         self.cv_pseudo_r2_ = None
+        self.cv_test_accuracy_ = None
 
     # -------------------- RESET MODE --------------------
 
@@ -556,9 +603,10 @@ class DecisionModel:
 
         For each fold, a freshly-initialized policy is fit from scratch
         (same multi-start optimization as 'fit()') on the training
-        segments, then evaluated (NLL only, no fitting) on the held-out
-        segments. This does not touch 'self.params'/'self.policy' — those
-        still reflect the whole-data fit from a separate 'fit()' call.
+        segments, then evaluated (NLL and prediction accuracy, no fitting)
+        on the held-out segments. This does not touch 'self.params'/
+        'self.policy' — those still reflect the whole-data fit from a
+        separate 'fit()' call.
 
         Parameters
         ----------
@@ -575,12 +623,15 @@ class DecisionModel:
         -------
         pd.DataFrame
             One row per fold: group/trial counts, train/test NLL, train/test
-            NLL per trial, and the fold's fitted parameters. Also stored on
-            'self.cv_results_'; aggregate held-out NLL, per-trial NLL and
-            pseudo-R^2 (vs. chance, ln(2)/trial) are stored on
-            'self.cv_test_nll_', 'self.cv_test_nll_per_trial_' and
-            'self.cv_pseudo_r2_'. 'to_dict()' folds a summary of these in
-            automatically once cross-validation has been run.
+            NLL per trial, train/test prediction accuracy (fraction of
+            trials where argmax(model probs) matches the observed choice),
+            and the fold's fitted parameters. Also stored on
+            'self.cv_results_'; aggregate held-out NLL, per-trial NLL,
+            pseudo-R^2 (vs. chance, ln(2)/trial) and accuracy (vs. chance,
+            0.5) are stored on 'self.cv_test_nll_',
+            'self.cv_test_nll_per_trial_', 'self.cv_pseudo_r2_' and
+            'self.cv_test_accuracy_'. 'to_dict()' folds a summary of these
+            in automatically once cross-validation has been run.
         """
         # Force a boundary at trial 0 regardless of reset_mode, so every
         # trial belongs to a well-defined group even if a custom reset mask
@@ -624,9 +675,12 @@ class DecisionModel:
                 es_slack=es_slack,
             )
 
+            n_train = int(train_mask.sum())
+            n_test = int(test_mask.sum())
+
             eval_policy = copy.deepcopy(self.policy)
             theta_k = [params_k[n] for n in eval_policy.active_parameter_names()]
-            test_nll_k = _nll_core(
+            test_nll_k, test_n_correct_k = _evaluate_core(
                 eval_policy,
                 self.choices[test_mask],
                 self.rewards[test_mask],
@@ -634,8 +688,18 @@ class DecisionModel:
                 theta_k,
             )
 
-            n_train = int(train_mask.sum())
-            n_test = int(test_mask.sum())
+            # train_policy already carries the fold's fitted params; reused
+            # here purely to also score prediction accuracy on the training
+            # segments (_evaluate_core resets/re-sets params internally, so
+            # its leftover post-fit state doesn't matter).
+            _, train_n_correct_k = _evaluate_core(
+                train_policy,
+                self.choices[train_mask],
+                self.rewards[train_mask],
+                self.resets[train_mask],
+                theta_k,
+            )
+
             records.append(
                 {
                     "fold": k,
@@ -647,6 +711,10 @@ class DecisionModel:
                     "test_nll": test_nll_k,
                     "train_nll_per_trial": train_nll_k / n_train,
                     "test_nll_per_trial": test_nll_k / n_test,
+                    "train_n_correct": train_n_correct_k,
+                    "test_n_correct": test_n_correct_k,
+                    "train_accuracy": train_n_correct_k / n_train,
+                    "test_accuracy": test_n_correct_k / n_test,
                     **params_k,
                 }
             )
@@ -662,6 +730,9 @@ class DecisionModel:
         chance_nll_per_trial = np.log(2)
         self.cv_pseudo_r2_ = 1.0 - self.cv_test_nll_per_trial_ / chance_nll_per_trial
 
+        total_test_n_correct = int(cv_df["test_n_correct"].sum())
+        self.cv_test_accuracy_ = total_test_n_correct / total_test_trials
+
         return cv_df
 
     def print_cv_summary(self):
@@ -674,6 +745,7 @@ class DecisionModel:
             f"({self.cv_test_nll_per_trial_:.4f} / trial)"
         )
         print(f"Pseudo-R^2 vs. chance: {self.cv_pseudo_r2_:.4f}")
+        print(f"Held-out accuracy: {self.cv_test_accuracy_:.4f}  (chance = 0.5)")
 
     # -------------------- POSTERIOR PREDICTIVE --------------------
 
@@ -990,12 +1062,17 @@ class DecisionModel:
                     cv_test_nll=self.cv_test_nll_,
                     cv_test_nll_per_trial=self.cv_test_nll_per_trial_,
                     cv_pseudo_r2=self.cv_pseudo_r2_,
+                    cv_test_accuracy=self.cv_test_accuracy_,
                     cv_train_nll_per_trial_mean=float(
                         cv["train_nll_per_trial"].mean()
                     ),
                     cv_train_nll_per_trial_std=float(cv["train_nll_per_trial"].std()),
                     cv_test_nll_per_trial_mean=float(cv["test_nll_per_trial"].mean()),
                     cv_test_nll_per_trial_std=float(cv["test_nll_per_trial"].std()),
+                    cv_train_accuracy_mean=float(cv["train_accuracy"].mean()),
+                    cv_train_accuracy_std=float(cv["train_accuracy"].std()),
+                    cv_test_accuracy_mean=float(cv["test_accuracy"].mean()),
+                    cv_test_accuracy_std=float(cv["test_accuracy"].std()),
                 )
             )
 
@@ -1012,6 +1089,10 @@ class DecisionModel:
                 "test_nll",
                 "train_nll_per_trial",
                 "test_nll_per_trial",
+                "train_n_correct",
+                "test_n_correct",
+                "train_accuracy",
+                "test_accuracy",
             }
             for name in cv.columns:
                 if name in meta_cols:
