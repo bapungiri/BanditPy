@@ -1,3 +1,4 @@
+import copy
 import numpy as np
 import pandas as pd
 from scipy.special import logsumexp
@@ -188,6 +189,150 @@ def _plot_logit_dynamics_ax(df, ax=None):
     return ax
 
 
+def _nll_core(
+    policy,
+    choices,
+    rewards,
+    resets,
+    theta,
+    best_nll=None,
+    warmup_trials=80,
+    check_every=25,
+    slack=0.02,
+):
+    """Negative log-likelihood of 'theta' under 'policy' on the given
+    trial sequence. Mutates 'policy' (and its 'beta_schedule') in place —
+    callers that need isolation should pass a fresh/copied policy.
+    """
+    beta_schedule = policy.beta_schedule
+    policy_names = policy.active_parameter_names()
+    all_params = dict(zip(policy_names, theta))
+
+    # Fill defaults for inactive parameters
+    for name, spec in policy.parameter_specs().items():
+        if name not in all_params:
+            all_params[name] = spec.default if spec.default is not None else 0.0
+
+    policy.set_params(all_params)
+
+    # reset after params are set so policies that read from self.params in reset don't KeyError
+    policy.reset()
+    beta_schedule.reset()
+
+    nll = 0.0
+
+    do_early_stop = (
+        best_nll is not None
+        and np.isfinite(best_nll)
+        and check_every is not None
+        and check_every > 0
+    )
+
+    for t, (c, r, reset) in enumerate(zip(choices, rewards, resets), start=1):
+        if reset:
+            policy.reset()
+            beta_schedule.reset()
+        else:
+            policy.forget()
+
+        logits = policy.logits()
+        nll -= softmax_loglik(
+            logits,
+            c,
+            beta_schedule.get_beta(),
+            beta_schedule.get_epsilon(),
+        )
+        policy.update(c, r)
+        beta_schedule.update()
+
+        # Cumulative NLL is monotonic, so this is a safe pruning criterion.
+        if do_early_stop and t >= warmup_trials and (t % check_every == 0):
+            if nll > best_nll * (1.0 + slack):
+                return nll
+
+    return nll
+
+
+def _fit_core(
+    policy,
+    choices,
+    rewards,
+    resets,
+    n_starts=10,
+    seed=None,
+    progress=False,
+    n_jobs=None,
+    optimizer=None,
+    early_stop=False,
+    es_warmup_trials=3000,
+    es_check_every=250,
+    es_slack=0.01,
+):
+    """Multi-start fit of 'policy' on the given trial sequence. Mutates
+    'policy' in place (ends with 'policy.set_params(params)') — callers
+    that need isolation (e.g. cross-validation folds) should pass a
+    fresh/copied policy. Returns '(params, best_nll, fvals)'.
+    """
+    rng = np.random.default_rng(seed)
+
+    if n_jobs is None:
+        n_jobs = _get_slurm_cpus(default=1)
+    n_jobs = max(1, min(n_jobs, n_starts))
+
+    print(f"Using {n_jobs} workers")
+
+    policy_names = policy.active_parameter_names()
+    all_bounds_dict = policy.get_bounds()
+    bounds = [(n, all_bounds_dict[n]) for n in policy_names]
+
+    seeds = rng.integers(0, 2**32 - 1, size=n_starts)
+
+    opt = resolve_optimizer(optimizer)
+
+    if early_stop:
+        best_seen = [np.inf]
+
+        def objective(theta):
+            val = _nll_core(
+                policy,
+                choices,
+                rewards,
+                resets,
+                theta,
+                best_nll=best_seen[0],
+                warmup_trials=es_warmup_trials,
+                check_every=es_check_every,
+                slack=es_slack,
+            )
+            if np.isfinite(val) and val < best_seen[0]:
+                best_seen[0] = val
+            return val
+
+    else:
+
+        def objective(theta):
+            return _nll_core(policy, choices, rewards, resets, theta)
+
+    best_fun, best_x, fvals = opt.fit(
+        objective=objective,
+        bounds=bounds,
+        seeds=seeds,
+        n_jobs=n_jobs,
+        progress=progress,
+    )
+
+    params = dict(zip(policy_names, best_x))
+
+    # Fill defaults for inactive parameters
+    for name, spec in policy.parameter_specs().items():
+        if name not in params:
+            params[name] = spec.default if spec.default is not None else 0.0
+
+    policy.set_params(params)
+
+    return params, best_fun, fvals
+
+
 class DecisionModel:
     def __init__(
         self,
@@ -217,6 +362,11 @@ class DecisionModel:
         self.fit_fvals = None
         self.fit_fval_mean = None
         self.fit_fval_std = None
+
+        self.cv_results_ = None
+        self.cv_test_nll_ = None
+        self.cv_test_nll_per_trial_ = None
+        self.cv_pseudo_r2_ = None
 
     # -------------------- RESET MODE --------------------
 
@@ -275,54 +425,17 @@ class DecisionModel:
         check_every=25,
         slack=0.02,
     ):
-        policy_names = self.policy.active_parameter_names()
-        all_params = dict(zip(policy_names, theta))
-
-        # Fill defaults for inactive parameters
-        for name, spec in self.policy.parameter_specs().items():
-            if name not in all_params:
-                all_params[name] = spec.default if spec.default is not None else 0.0
-
-        self.policy.set_params(all_params)
-
-        # reset after params are set so policies that read from self.params in reset don't KeyError
-        self.policy.reset()
-        self.beta_schedule.reset()
-
-        nll = 0.0
-
-        do_early_stop = (
-            best_nll is not None
-            and np.isfinite(best_nll)
-            and check_every is not None
-            and check_every > 0
+        return _nll_core(
+            self.policy,
+            self.choices,
+            self.rewards,
+            self.resets,
+            theta,
+            best_nll=best_nll,
+            warmup_trials=warmup_trials,
+            check_every=check_every,
+            slack=slack,
         )
-
-        for t, (c, r, reset) in enumerate(
-            zip(self.choices, self.rewards, self.resets), start=1
-        ):
-            if reset:
-                self.policy.reset()
-                self.beta_schedule.reset()
-            else:
-                self.policy.forget()
-
-            logits = self.policy.logits()
-            nll -= softmax_loglik(
-                logits,
-                c,
-                self.beta_schedule.get_beta(),
-                self.beta_schedule.get_epsilon(),
-            )
-            self.policy.update(c, r)
-            self.beta_schedule.update()
-
-            # Cumulative NLL is monotonic, so this is a safe pruning criterion.
-            if do_early_stop and t >= warmup_trials and (t % check_every == 0):
-                if nll > best_nll * (1.0 + slack):
-                    return nll
-
-        return nll
 
     def get_trial_nll(self):
         """Return per-trial negative log-likelihood."""
@@ -399,61 +512,168 @@ class DecisionModel:
         es_check_every=250,  # check every 250 trials after warmup
         es_slack=0.01,  # Keep if within 1% of best NLL seen so far
     ):
-        rng = np.random.default_rng(seed)
-
-        if n_jobs is None:
-            n_jobs = _get_slurm_cpus(default=1)
-        n_jobs = max(1, min(n_jobs, n_starts))
-
-        print(f"Using {n_jobs} workers")
-
-        policy_names = self.policy.active_parameter_names()
-        all_bounds_dict = self.policy.get_bounds()
-        bounds = [(n, all_bounds_dict[n]) for n in policy_names]
-
-        seeds = rng.integers(0, 2**32 - 1, size=n_starts)
-
-        opt = resolve_optimizer(optimizer)
-
-        if early_stop:
-            best_seen = [np.inf]
-
-            def objective(theta):
-                val = self._nll(
-                    theta,
-                    best_nll=best_seen[0],
-                    warmup_trials=es_warmup_trials,
-                    check_every=es_check_every,
-                    slack=es_slack,
-                )
-                if np.isfinite(val) and val < best_seen[0]:
-                    best_seen[0] = val
-                return val
-
-        else:
-            objective = self._nll
-
-        best_fun, best_x, fvals = opt.fit(
-            objective=objective,
-            bounds=bounds,
-            seeds=seeds,
-            n_jobs=n_jobs,
+        self.params, self.nll, self.fit_fvals = _fit_core(
+            self.policy,
+            self.choices,
+            self.rewards,
+            self.resets,
+            n_starts=n_starts,
+            seed=seed,
             progress=progress,
+            n_jobs=n_jobs,
+            optimizer=optimizer,
+            early_stop=early_stop,
+            es_warmup_trials=es_warmup_trials,
+            es_check_every=es_check_every,
+            es_slack=es_slack,
         )
+        self.fit_fval_mean = float(self.fit_fvals.mean())
+        self.fit_fval_std = float(self.fit_fvals.std())
 
-        self.params = dict(zip(policy_names, best_x))
+    # -------------------- CROSS-VALIDATION --------------------
 
-        # Fill defaults for inactive parameters
-        for name, spec in self.policy.parameter_specs().items():
-            if name not in self.params:
-                self.params[name] = spec.default if spec.default is not None else 0.0
+    def cross_validate(
+        self,
+        n_folds=5,
+        seed=None,
+        n_starts=10,
+        progress=False,
+        n_jobs=None,
+        optimizer=None,
+        early_stop=False,
+        es_warmup_trials=3000,
+        es_check_every=250,
+        es_slack=0.01,
+    ):
+        """K-fold cross-validation, holding out whole reset segments.
 
-        self.nll = best_fun
-        self.fit_fvals = fvals
-        self.fit_fval_mean = float(fvals.mean())
-        self.fit_fval_std = float(fvals.std())
+        Because the policy carries state across trials within a segment
+        (reset at each 'self.resets' boundary — session/block/window/
+        custom mask, per 'reset_mode'), folds are built by holding out
+        entire segments rather than individual trials: splitting trials
+        directly would sever the within-segment sequential dependency and
+        make the held-out likelihood meaningless.
 
-        self.policy.set_params(self.params)
+        For each fold, a freshly-initialized policy is fit from scratch
+        (same multi-start optimization as 'fit()') on the training
+        segments, then evaluated (NLL only, no fitting) on the held-out
+        segments. This does not touch 'self.params'/'self.policy' — those
+        still reflect the whole-data fit from a separate 'fit()' call.
+
+        Parameters
+        ----------
+        n_folds : int
+            Number of folds; must not exceed the number of independent
+            reset segments.
+        seed : int, optional
+            Seeds the fold assignment (group shuffle) and, offset per fold,
+            each fold's optimizer restarts.
+        n_starts, progress, n_jobs, optimizer, early_stop, es_* :
+            Passed through to each fold's fit, same meaning as in 'fit()'.
+
+        Returns
+        -------
+        pd.DataFrame
+            One row per fold: group/trial counts, train/test NLL, train/test
+            NLL per trial, and the fold's fitted parameters. Also stored on
+            'self.cv_results_'; aggregate held-out NLL, per-trial NLL and
+            pseudo-R^2 (vs. chance, ln(2)/trial) are stored on
+            'self.cv_test_nll_', 'self.cv_test_nll_per_trial_' and
+            'self.cv_pseudo_r2_'. 'to_dict()' folds a summary of these in
+            automatically once cross-validation has been run.
+        """
+        # Force a boundary at trial 0 regardless of reset_mode, so every
+        # trial belongs to a well-defined group even if a custom reset mask
+        # doesn't mark the first trial True.
+        reset_flags = np.array(self.resets, dtype=bool, copy=True)
+        reset_flags[0] = True
+        groups = np.cumsum(reset_flags) - 1
+        unique_groups = np.unique(groups)
+
+        if n_folds > len(unique_groups):
+            raise ValueError(
+                f"n_folds ({n_folds}) cannot exceed the number of independent "
+                f"reset segments ({len(unique_groups)})."
+            )
+
+        rng = np.random.default_rng(seed)
+        shuffled_groups = rng.permutation(unique_groups)
+        fold_groups = np.array_split(shuffled_groups, n_folds)
+
+        records = []
+        for k, test_groups in enumerate(fold_groups):
+            test_mask = np.isin(groups, test_groups)
+            train_mask = ~test_mask
+
+            fold_seed = None if seed is None else int(seed) + k
+
+            train_policy = copy.deepcopy(self.policy)
+            params_k, train_nll_k, _ = _fit_core(
+                train_policy,
+                self.choices[train_mask],
+                self.rewards[train_mask],
+                self.resets[train_mask],
+                n_starts=n_starts,
+                seed=fold_seed,
+                progress=progress,
+                n_jobs=n_jobs,
+                optimizer=optimizer,
+                early_stop=early_stop,
+                es_warmup_trials=es_warmup_trials,
+                es_check_every=es_check_every,
+                es_slack=es_slack,
+            )
+
+            eval_policy = copy.deepcopy(self.policy)
+            theta_k = [params_k[n] for n in eval_policy.active_parameter_names()]
+            test_nll_k = _nll_core(
+                eval_policy,
+                self.choices[test_mask],
+                self.rewards[test_mask],
+                self.resets[test_mask],
+                theta_k,
+            )
+
+            n_train = int(train_mask.sum())
+            n_test = int(test_mask.sum())
+            records.append(
+                {
+                    "fold": k,
+                    "n_train_groups": len(unique_groups) - len(test_groups),
+                    "n_test_groups": len(test_groups),
+                    "n_train_trials": n_train,
+                    "n_test_trials": n_test,
+                    "train_nll": train_nll_k,
+                    "test_nll": test_nll_k,
+                    "train_nll_per_trial": train_nll_k / n_train,
+                    "test_nll_per_trial": test_nll_k / n_test,
+                    **params_k,
+                }
+            )
+
+        cv_df = pd.DataFrame.from_records(records)
+        self.cv_results_ = cv_df
+
+        total_test_nll = float(cv_df["test_nll"].sum())
+        total_test_trials = int(cv_df["n_test_trials"].sum())
+        self.cv_test_nll_ = total_test_nll
+        self.cv_test_nll_per_trial_ = total_test_nll / total_test_trials
+
+        chance_nll_per_trial = np.log(2)
+        self.cv_pseudo_r2_ = 1.0 - self.cv_test_nll_per_trial_ / chance_nll_per_trial
+
+        return cv_df
+
+    def print_cv_summary(self):
+        if self.cv_results_ is None:
+            print("Run cross_validate() first.")
+            return
+        print(f"Folds: {len(self.cv_results_)}")
+        print(
+            f"Held-out NLL: {self.cv_test_nll_:.2f}  "
+            f"({self.cv_test_nll_per_trial_:.4f} / trial)"
+        )
+        print(f"Pseudo-R^2 vs. chance: {self.cv_pseudo_r2_:.4f}")
 
     # -------------------- POSTERIOR PREDICTIVE --------------------
 
@@ -761,4 +981,42 @@ class DecisionModel:
                 beta_schedule_type=self.beta_schedule.__class__.__name__,
             )
         )
+
+        if self.cv_results_ is not None:
+            cv = self.cv_results_
+            out.update(
+                dict(
+                    cv_n_folds=int(len(cv)),
+                    cv_test_nll=self.cv_test_nll_,
+                    cv_test_nll_per_trial=self.cv_test_nll_per_trial_,
+                    cv_pseudo_r2=self.cv_pseudo_r2_,
+                    cv_train_nll_per_trial_mean=float(
+                        cv["train_nll_per_trial"].mean()
+                    ),
+                    cv_train_nll_per_trial_std=float(cv["train_nll_per_trial"].std()),
+                    cv_test_nll_per_trial_mean=float(cv["test_nll_per_trial"].mean()),
+                    cv_test_nll_per_trial_std=float(cv["test_nll_per_trial"].std()),
+                )
+            )
+
+            # Per-parameter mean/std across folds — a stability check: a
+            # parameter that swings wildly across folds is poorly
+            # constrained by the data even if held-out NLL looks fine.
+            meta_cols = {
+                "fold",
+                "n_train_groups",
+                "n_test_groups",
+                "n_train_trials",
+                "n_test_trials",
+                "train_nll",
+                "test_nll",
+                "train_nll_per_trial",
+                "test_nll_per_trial",
+            }
+            for name in cv.columns:
+                if name in meta_cols:
+                    continue
+                out[f"cv_{name}_mean"] = float(cv[name].mean())
+                out[f"cv_{name}_std"] = float(cv[name].std())
+
         return out
