@@ -6,7 +6,7 @@ from scipy.special import betainc, beta as Bfn
 from .base import BasePolicy, ParameterGroup, ParameterSpec
 
 
-class BaseThompson2Arm(BasePolicy):
+class BaseThompson(BasePolicy):
     """
     Shared posterior mechanics for Thompson sampling.
     Subclasses differ only in learning-rate structure.
@@ -73,7 +73,7 @@ class BaseThompson2Arm(BasePolicy):
         return A, B, mean
 
 
-class ThompsonShared2Arm(BaseThompson2Arm):
+class ThompsonShared(BaseThompson):
     """
     Thompson sampling:
     Shared learning rates for chosen / unchosen outcomes.
@@ -107,7 +107,7 @@ class ThompsonShared2Arm(BaseThompson2Arm):
             self.s[other] += lr_u_pos
 
 
-class ThompsonSplit2Arm(BaseThompson2Arm):
+class ThompsonSplit(BaseThompson):
     """
     Thompson sampling:
     Fully independent pos/neg learning rates for both arms.

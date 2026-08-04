@@ -13,48 +13,7 @@ def _softmax(x: np.ndarray, beta: float) -> np.ndarray:
     return e / s
 
 
-class Qlearn2Arm(BasePolicy):
-    """
-    Vanilla 2-arm Q-learning with counterfactual updates.
-
-    Update rule:
-    Q[choice] += alpha_c * (reward - Q[choice])
-    Q[unchosen] += alpha_u * (reward - Q[choice])
-    """
-
-    class Params(ParameterGroup):
-        alpha_c = ParameterSpec(
-            "alpha_c", (-0.99, 0.99), description="Learning rate for chosen option"
-        )
-        alpha_u = ParameterSpec(
-            "alpha_u", (-0.99, 0.99), description="Learning rate for unchosen option"
-        )
-
-    params: Params
-
-    def reset(self):
-        self.q = np.full(2, 0.5)
-
-    def forget(self):
-        pass  # no forgetting in vanilla Q-learning
-
-    def logits(self):
-        return self.q.copy()
-
-    def update(self, choice, reward):
-        a_c = self.params["alpha_c"]
-        a_u = self.params["alpha_u"]
-
-        other = 1 - choice
-        pe = reward - self.q[choice]
-
-        self.q[choice] += a_c * pe
-        self.q[other] += a_u * pe
-
-        self.q[:] = np.clip(self.q, 0.0, 1.0)
-
-
-class QlearnBias2Arm(BasePolicy):
+class Qlearn(BasePolicy):
     """
     2-arm Q-learning with counterfactual updates and a port bias term.
 
@@ -103,8 +62,9 @@ class QlearnBias2Arm(BasePolicy):
         self.q[:] = np.clip(self.q, 0.0, 1.0)
 
 
-class QlearnH2Arm(BasePolicy):
-    """Qlearn with perseverance term to add sticky behaviour i.e, propensity to chhoose the same port irrespective of the reward."""
+class QlearnSticky(BasePolicy):
+    """Qlearn with a perseverance (sticky) term for the propensity to choose
+    the same port irrespective of reward, plus a static port bias term."""
 
     class Params(ParameterGroup):
         alpha_c = ParameterSpec(
@@ -117,6 +77,9 @@ class QlearnH2Arm(BasePolicy):
             "alpha_h", (0.0, 1.0), description="Perseverance learning"
         )
         scaler = ParameterSpec("scaler", (1, 10.0), description="Perseverance scale")
+        bias = ParameterSpec(
+            "bias", (-2.0, 2.0), default=0.0, description="Bias toward port 0 vs port 1"
+        )
 
     params: Params
 
@@ -139,12 +102,13 @@ class QlearnH2Arm(BasePolicy):
 
     def logits(self):
         h = self.h
-        bias0 = h - 0.5
-        bias1 = 0.5 - h
+        stick0 = h - 0.5
+        stick1 = 0.5 - h
+        b = self.params["bias"]
         return np.array(
             (
-                self.q[0] + self.params["scaler"] * bias0,
-                self.q[1] + self.params["scaler"] * bias1,
+                self.q[0] + self.params["scaler"] * stick0 + b,
+                self.q[1] + self.params["scaler"] * stick1 - b,
             ),
             dtype=float,
         )
@@ -165,7 +129,7 @@ class QlearnH2Arm(BasePolicy):
         self.h += p["alpha_h"] * (choice - self.h)
 
 
-class QlearnHierarchical2Arm(BasePolicy):
+class QlearnHierarchical(BasePolicy):
     """
     Two-option hierarchical RL for a 2-armed bandit.
 
@@ -262,7 +226,7 @@ class QlearnHierarchical2Arm(BasePolicy):
             self.m[k] += am * resp[k] * m_pe
 
 
-class QlearnWM2Arm(BasePolicy):
+class QlearnWM(BasePolicy):
     """
     RL + Working Memory model for 2-arm bandit.
 
@@ -347,7 +311,7 @@ class QlearnWM2Arm(BasePolicy):
         self.q_wm[choice] = float(reward)
 
 
-class QlearnDynamicLR2Arm(BasePolicy):
+class QlearnDynamicLR(BasePolicy):
     """
     2-arm Q-learning with dynamic learning rate.
 
@@ -405,7 +369,7 @@ class QlearnDynamicLR2Arm(BasePolicy):
         np.clip(self.q, 0.0, 1.0, out=self.q)
 
 
-class QlearnAdaptiveLR2Arm(BasePolicy):
+class QlearnAdaptiveLR(BasePolicy):
     """
     2-arm Q-learning with a reward-rate dependent adaptive learning rate.
 
@@ -455,6 +419,9 @@ class QlearnAdaptiveLR2Arm(BasePolicy):
             (0.02, 0.5),
             description="EWMA weight for the reward-rate trace",
         )
+        bias = ParameterSpec(
+            "bias", (-2.0, 2.0), default=0.0, description="Bias toward port 0 vs port 1"
+        )
 
     params: Params
 
@@ -468,7 +435,8 @@ class QlearnAdaptiveLR2Arm(BasePolicy):
         pass
 
     def logits(self):
-        return self.q.copy()
+        b = self.params["bias"]
+        return np.array([self.q[0] + b, self.q[1] - b])
 
     def update(self, choice, reward):
         other = 1 - choice

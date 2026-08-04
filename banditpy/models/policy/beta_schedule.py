@@ -23,8 +23,8 @@ class BetaSchedule:
 
     Examples
     --------
-    model = DecisionModel(task, Qlearn2Arm())
-    model = DecisionModel(task, Qlearn2Arm(), beta_schedule=ExponentialBeta())
+    model = DecisionModel(task, Qlearn())
+    model = DecisionModel(task, Qlearn(), beta_schedule=ExponentialBeta())
     model.beta_schedule.params.beta_0.set_bounds(0.5, 20.0)
     """
 
@@ -320,7 +320,7 @@ class NoBeta(BetaSchedule):
     Fixed ``beta=1.0``, ``epsilon=0.0`` — no free parameters.
 
     Use for policies that handle their own softmax internally
-    (e.g. ``QlearnWM2Arm``, ``QlearnHierarchical2Arm``). Passing
+    (e.g. ``QlearnWM``, ``QlearnHierarchical``). Passing
     their log-probability logits through softmax with ``beta=1`` is a
     mathematical identity, so no distortion is introduced.
     """

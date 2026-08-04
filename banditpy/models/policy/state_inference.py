@@ -2,7 +2,7 @@ import numpy as np
 from .base import BasePolicy, ParameterGroup, ParameterSpec
 
 
-class StateInference2Arm(BasePolicy):
+class StateInference(BasePolicy):
     """
     Two-state Bayesian state-inference policy.
 
