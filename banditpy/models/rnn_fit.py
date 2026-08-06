@@ -65,6 +65,33 @@ def _run_fold(
     return fold, train_nll, test_nll, test_windows, records
 
 
+def _run_restart(
+    seed,
+    task,
+    seg_mask,
+    hidden_size,
+    device_str,
+    n_epochs,
+    lr,
+    lr_min,
+    progress_bar,
+):
+    """Module-level worker so ProcessPoolExecutor can pickle it."""
+    import torch  # re-import in subprocess
+
+    torch.set_num_threads(1)  # prevent intra-op thread contention across workers
+    torch.manual_seed(seed)  # controls the model's random weight init
+
+    fitter = VanillaRNNFit2Arm(
+        task=task,
+        hidden_size=hidden_size,
+        segment_starts=seg_mask,
+        device=device_str,
+    )
+    fitter.fit(n_epochs=n_epochs, lr=lr, lr_min=lr_min, progress_bar=progress_bar)
+    return seed, fitter.nll_history[-1], fitter.model.state_dict(), fitter.nll_history
+
+
 class VanillaRNNModel(nn.Module):
     """Vanilla RNN for the two-armed bandit task.
 
@@ -661,12 +688,37 @@ class VanillaRNNFit2Arm:
             n_trials += len(y_seq)
         return total_nll, n_trials
 
+    def _fit_single(self, n_epochs, lr, lr_min, progress_bar):
+        """Single training run (one weight init). Returns (nll_history, n_trials)."""
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=n_epochs, eta_min=lr_min
+        )
+
+        nll_history = []
+        self.model.train()
+
+        for _ in tqdm(range(n_epochs), disable=not progress_bar):
+            optimizer.zero_grad()
+            total_nll, n_trials = self._total_nll()
+            nll_per_trial = total_nll / n_trials
+            nll_per_trial.backward()
+            optimizer.step()
+            scheduler.step()
+            nll_history.append(nll_per_trial.item())
+
+        self.model.eval()
+        return nll_history, n_trials
+
     def fit(
         self,
         n_epochs: int = 500,
         lr: float = 0.001,
         lr_min: float = 1e-5,
         progress_bar: bool = True,
+        n_restarts: int = 1,
+        seed: int = None,
+        n_jobs: int = None,
     ):
         """Fit the RNN to the observed choice sequence.
 
@@ -681,28 +733,106 @@ class VanillaRNNFit2Arm:
         lr_min : float
             Minimum learning rate at end of cosine decay.
         progress_bar : bool
+        n_restarts : int
+            Number of independent random re-initializations to train, to guard
+            against getting stuck in a bad local minimum.  Each restart uses a
+            different weight init; the restart with the lowest final training
+            NLL/trial is kept as ``self.model``.  Default 1 reproduces the
+            previous single-fit behaviour exactly.  Restarts only address
+            optimization -- generalization should still be assessed separately
+            via ``cross_validate``.
+        seed : int, optional
+            Base seed for drawing per-restart init seeds.  Ignored when
+            ``n_restarts=1``.
+        n_jobs : int or None
+            Number of parallel worker processes when ``n_restarts > 1``.
+            ``None`` (default) reads ``SLURM_CPUS_PER_TASK`` /
+            ``SLURM_JOB_CPUS_PER_NODE`` and falls back to 1.  Workers are
+            clamped to ``n_restarts``.  Only beneficial on CPU -- avoid with
+            ``device="cuda"`` (state dicts must cross process boundaries).
+
+        Notes
+        -----
+        After a multi-restart fit, ``self.restart_nlls`` maps each restart's
+        seed to its final training NLL/trial, and ``self.best_restart_seed``
+        records which one was kept -- useful for checking how much restarts
+        helped and how much variance there is across seeds.
         """
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=n_epochs, eta_min=lr_min
+        if n_restarts == 1:
+            self.nll_history, n_trials = self._fit_single(
+                n_epochs, lr, lr_min, progress_bar
+            )
+            print(
+                f"Fit complete. Final NLL/trial: {self.nll_history[-1]:.4f}  "
+                f"(n_trials={n_trials}, n_segments={len(self.segments)})"
+            )
+            return
+
+        seeds = (
+            np.random.default_rng(seed).integers(0, 2**31 - 1, size=n_restarts).tolist()
         )
 
-        self.nll_history = []
-        self.model.train()
+        device_str = str(self.device)
+        hidden_size = self.model.hidden_size
+        if n_jobs is None:
+            n_jobs = _get_slurm_cpus(default=1)
+        workers = max(1, min(n_jobs, n_restarts))
+        print(f"Using {workers} worker(s) for {n_restarts} restarts")
 
-        for _ in tqdm(range(n_epochs), disable=not progress_bar):
-            optimizer.zero_grad()
-            total_nll, n_trials = self._total_nll()
-            nll_per_trial = total_nll / n_trials
-            nll_per_trial.backward()
-            optimizer.step()
-            scheduler.step()
-            self.nll_history.append(nll_per_trial.item())
+        results = []
+        if workers == 1:
+            for i, s in enumerate(seeds):
+                _, final_nll, state_dict, history = _run_restart(
+                    s,
+                    self.task,
+                    self._seg_mask,
+                    hidden_size,
+                    device_str,
+                    n_epochs,
+                    lr,
+                    lr_min,
+                    progress_bar,
+                )
+                print(
+                    f"  Restart {i + 1}/{n_restarts} (seed={s}) — "
+                    f"final NLL/trial: {final_nll:.4f}"
+                )
+                results.append((s, final_nll, state_dict, history))
+        else:
+            futures = {}
+            with ProcessPoolExecutor(max_workers=workers) as pool:
+                for s in seeds:
+                    fut = pool.submit(
+                        _run_restart,
+                        s,
+                        self.task,
+                        self._seg_mask,
+                        hidden_size,
+                        device_str,
+                        n_epochs,
+                        lr,
+                        lr_min,
+                        progress_bar,
+                    )
+                    futures[fut] = s
+                for fut in as_completed(futures):
+                    s, final_nll, state_dict, history = fut.result()
+                    print(f"  Restart (seed={s}) — final NLL/trial: {final_nll:.4f}")
+                    results.append((s, final_nll, state_dict, history))
 
+        results.sort(key=lambda r: r[1])  # lowest final NLL/trial first
+        best_seed, best_nll, best_state, best_history = results[0]
+
+        self.model.load_state_dict(best_state)
+        self.model.to(self.device)
         self.model.eval()
+        self.nll_history = best_history
+        self.restart_nlls = {s: nll for s, nll, _, _ in results}
+        self.best_restart_seed = best_seed
+
         print(
-            f"Fit complete. Final NLL/trial: {self.nll_history[-1]:.4f}  "
-            f"(n_trials={n_trials}, n_segments={len(self.segments)})"
+            f"Fit complete ({n_restarts} restarts). Best seed={best_seed}, "
+            f"final NLL/trial: {best_nll:.4f} (n_segments={len(self.segments)})"
         )
 
     @property
