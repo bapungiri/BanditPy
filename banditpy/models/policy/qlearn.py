@@ -454,3 +454,59 @@ class QlearnAdaptiveLR(BasePolicy):
         self.q[choice] += self.alpha_c * pe
         self.q[other] += self.alpha_u * pe
         np.clip(self.q, 0.0, 1.0, out=self.q)
+
+
+class QlearnDiff(BasePolicy):
+    """
+    2-arm Q-learning driven by the chosen-vs-unchosen value difference.
+
+    Instead of separate learning rates for the chosen and unchosen options,
+    a single alpha scales the update to the difference between them. The
+    difference ranges from -1 to 1, and the reward prediction error compares
+    reward to the absolute value of that difference (how confidently the
+    chosen option was already favoured).
+
+    Update rule:
+    diff = Q[choice] - Q[unchosen]
+    rpe = reward - abs(diff)
+    Q[choice] += alpha * rpe
+    Q[unchosen] -= alpha * rpe
+
+    Choice logits:
+    logit[0] = Q[0] + bias
+    logit[1] = Q[1] - bias
+    """
+
+    class Params(ParameterGroup):
+        alpha = ParameterSpec(
+            "alpha", (0.0, 0.99), description="Learning rate for the chosen/unchosen difference"
+        )
+
+        bias = ParameterSpec(
+            "bias", (-2.0, 2.0), default=0.0, description="Bias toward port 0 vs port 1"
+        )
+
+    params: Params
+
+    def reset(self):
+        self.q = np.full(2, 0.5)
+
+    def forget(self):
+        pass
+
+    def logits(self):
+        b = self.params["bias"]
+        return np.array([self.q[0] + b, self.q[1] - b])
+
+    def update(self, choice, reward):
+        a = self.params["alpha"]
+        other = 1 - choice
+
+        diff = self.q[choice] - self.q[other]
+        rpe = reward - abs(diff)
+
+        delta = a * rpe
+        self.q[choice] += delta
+        self.q[other] -= delta
+
+        self.q[:] = np.clip(self.q, 0.0, 1.0)
