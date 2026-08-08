@@ -4,18 +4,14 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .model import DecisionModel
-    from .qlearn import Qlearn2Arm
     from .regression_models import Logistic2Arm
     from .rnn_fit import VanillaRNNFit2Arm, VanillaRNNModel, VanillaRNNTrainer2Arm
     from .rnn_models import BanditTrainer2Arm
-    from .thompson_models import Thompson2Arm
 
 __all__ = [
     "BanditTrainer2Arm",
     "DecisionModel",
     "Logistic2Arm",
-    "Qlearn2Arm",
-    "Thompson2Arm",
     "VanillaRNNFit2Arm",
     "VanillaRNNModel",
     "VanillaRNNTrainer2Arm",
@@ -23,10 +19,6 @@ __all__ = [
 
 
 def __getattr__(name):
-    if name == "Qlearn2Arm":
-        from .qlearn import Qlearn2Arm
-
-        return Qlearn2Arm
     if name == "Logistic2Arm":
         from .regression_models import Logistic2Arm
 
@@ -35,10 +27,6 @@ def __getattr__(name):
         from .rnn_models import BanditTrainer2Arm
 
         return BanditTrainer2Arm
-    if name == "Thompson2Arm":
-        from .thompson_models import Thompson2Arm
-
-        return Thompson2Arm
     if name == "DecisionModel":
         from .model import DecisionModel
 

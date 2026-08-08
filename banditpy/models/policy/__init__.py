@@ -16,6 +16,7 @@ from .qlearn import (
     QlearnWM,
     QlearnDynamicLR,
     QlearnAdaptiveLR,
+    QlearnDiff,
 )
 from .thompson import ThompsonShared, ThompsonSplit
 from .state_inference import StateInference
