@@ -20,3 +20,4 @@ from .qlearn import (
 )
 from .thompson import ThompsonShared, ThompsonSplit
 from .state_inference import StateInference
+from .regime import QlearnRegime, QlearnRegimeDiff, QlearnRegimeDiffStays
