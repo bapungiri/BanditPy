@@ -394,3 +394,174 @@ class QlearnRegimeDiffStays(BasePolicy):
             ]
         )
         return inv_leave / inv_leave.sum()
+
+
+class MoARegime(BasePolicy):
+    """
+    Mixture-of-agents HMM (MoA-HMM), after Venditto, Miller, Brody & Daw
+    (2024, "Dynamic reinforcement learning reveals time-dependent shifts in
+    strategy during reward learning") — architecturally distinct from the
+    other classes in this file.
+
+    'QlearnRegime'/'QlearnRegimeDiff'/'QlearnRegimeDiffStays' give each
+    regime its own private Q-values, updated only in proportion to that
+    regime's current responsibility ('resp[k]') — so a regime's values sit
+    frozen whenever it's not currently believed active. This class instead
+    follows the paper's structure: a small FIXED set of agents, each with
+    its own persistent values, updates *unconditionally* every trial
+    regardless of which regime is currently believed active — only the
+    weights used to *combine* the agents' values into a choice change with
+    regime. Concretely, per regime k:
+
+        V_k(y) = sum_A  beta_A_k * Q_A(y)
+        p(y | regime k) = softmax(V_k)
+
+    and the belief 'b' over regimes marginalizes over this per trial,
+    exactly as in the other regime classes.
+
+    Agents (first draft — meant to be tinkered with)
+    --------------------------------------------------
+    - 'mfr' (model-free, reward-driven): Q *= (1-alpha_mfr); Q[c] += alpha_mfr * reward.
+    - 'mfc' (model-free, choice-driven / perseveration): Q *= (1-alpha_mfc); Q[c] += alpha_mfc.
+      Ignores reward entirely — a pure choice kernel, after the paper's 'MFchoice' agent.
+    - 'bias' (static side preference): fixed contrast [+1, -1], never
+      updated — matches the paper's 'Bias' agent (no learning rate). Unlike
+      'mfr'/'mfc', its weight 'beta_bias' is a single value shared across
+      all 3 regimes rather than regime-specific — a side preference is a
+      stable trait, not obviously something that should flip with inferred
+      strategy, and every other class in this file already treats bias as
+      global rather than regime-dependent.
+
+    Only 2 agents for now — the paper's model-based agents rely on the
+    two-step task's action-state transition model, which has no analogue
+    in a 2-armed bandit, so that piece is left out here rather than
+    guessed at. A bandit-appropriate stand-in (e.g. an agent that assumes
+    the two arms' probabilities are anti-correlated and updates the
+    unchosen arm oppositely, exploiting the structured task's known
+    correlation) can be added back in once you've settled on what
+    "model-based" should mean for this task — see 'QlearnRegimeDiff's
+    coupled chosen/unchosen update for the update rule it would reuse.
+
+    Agent learning rates ('alpha_mfr'/'alpha_mfc') are shared across
+    regimes, matching the paper (only the combination weights are
+    regime-specific) — 2 + 3*2 + 1 + 1 = 10 free parameters total.
+
+    'update()' order per trial:
+    1. V_k, opt_probs[k]  = combined values / choice probs per regime (pre-update agent values)
+    2. lik[k]             = opt_probs[k, choice]
+    3. resp               = normalize(b * lik)                    # posterior over regimes (belief only)
+    4. q_mfr, q_mfc       += unconditional per-agent updates       # NOT scaled by resp — the key
+                                                                    # difference from the other classes
+    5. b                  <- resp @ T(stay)                       # propagate belief
+    """
+
+    default_beta_schedule = NoBeta
+
+    class Params(ParameterGroup):
+        alpha_mfr = ParameterSpec(
+            "alpha_mfr",
+            (0.0, 0.99),
+            description="Learning rate, model-free reward agent",
+        )
+        alpha_mfc = ParameterSpec(
+            "alpha_mfc", (0.0, 0.99), description="Learning rate, choice-kernel agent"
+        )
+        beta_mfr_0 = ParameterSpec(
+            "beta_mfr_0", (-10.0, 10.0), description="Regime 0 weight on mfr agent"
+        )
+        beta_mfc_0 = ParameterSpec(
+            "beta_mfc_0", (-10.0, 10.0), description="Regime 0 weight on mfc agent"
+        )
+        beta_mfr_1 = ParameterSpec(
+            "beta_mfr_1", (-10.0, 10.0), description="Regime 1 weight on mfr agent"
+        )
+        beta_mfc_1 = ParameterSpec(
+            "beta_mfc_1", (-10.0, 10.0), description="Regime 1 weight on mfc agent"
+        )
+        beta_mfr_2 = ParameterSpec(
+            "beta_mfr_2", (-10.0, 10.0), description="Regime 2 weight on mfr agent"
+        )
+        beta_mfc_2 = ParameterSpec(
+            "beta_mfc_2", (-10.0, 10.0), description="Regime 2 weight on mfc agent"
+        )
+        beta_bias = ParameterSpec(
+            "beta_bias",
+            (-10.0, 10.0),
+            description="Weight on bias agent (shared across regimes)",
+        )
+        stay = ParameterSpec(
+            "stay",
+            (0.0, 0.99),
+            description="Probability of remaining in the same regime",
+        )
+
+    params: Params
+
+    def reset(self):
+        self.q_mfr = np.zeros(2)
+        self.q_mfc = np.zeros(2)
+        self.q_bias = np.array([1.0, -1.0])
+        self.b = np.full(N_REGIMES, 1.0 / N_REGIMES)
+
+    def forget(self):
+        pass
+
+    def _agent_values(self):
+        return np.vstack([self.q_mfr, self.q_mfc])
+
+    def _regime_betas(self):
+        p = self.params
+        return np.array(
+            [
+                [p["beta_mfr_0"], p["beta_mfc_0"]],
+                [p["beta_mfr_1"], p["beta_mfc_1"]],
+                [p["beta_mfr_2"], p["beta_mfc_2"]],
+            ]
+        )
+
+    def _regime_choice_probs(self):
+        betas = self._regime_betas()  # (N_REGIMES, N_AGENTS)
+        agents = self._agent_values()  # (N_AGENTS, 2)
+        # Broadcast-accumulate instead of `betas @ agents` (2D-by-2D `@`):
+        # this environment's numpy/BLAS build hard-crashes (no traceback)
+        # on small 2D matmuls, while 1D-by-2D products and elementwise ops
+        # are unaffected — see `self.b @ opt_probs` below, which is safe.
+        V = np.zeros((N_REGIMES, 2))
+        for a in range(agents.shape[0]):
+            V += betas[:, a : a + 1] * agents[a]
+        V += self.params["beta_bias"] * self.q_bias  # shared across regimes
+        return np.vstack([_softmax(V[k], 1.0) for k in range(N_REGIMES)])
+
+    def logits(self):
+        opt_probs = self._regime_choice_probs()
+        p_action = self.b @ opt_probs
+        p_action = np.clip(p_action, 1e-9, 1.0)
+        return np.log(p_action)
+
+    def update(self, choice, reward):
+        opt_probs = self._regime_choice_probs()
+        lik = opt_probs[:, choice]
+
+        resp = self.b * lik
+        resp_sum = resp.sum()
+        if resp_sum <= 0:
+            resp = np.full(N_REGIMES, 1.0 / N_REGIMES)
+        else:
+            resp /= resp_sum
+
+        p = self.params
+
+        # unconditional agent updates — not scaled by resp
+        self.q_mfr *= 1.0 - p["alpha_mfr"]
+        self.q_mfr[choice] += p["alpha_mfr"] * reward
+
+        self.q_mfc *= 1.0 - p["alpha_mfc"]
+        self.q_mfc[choice] += p["alpha_mfc"]
+
+        stay = p["stay"]
+        switch = (1.0 - stay) / (N_REGIMES - 1)
+        T = np.full((N_REGIMES, N_REGIMES), switch)
+        np.fill_diagonal(T, stay)
+
+        self.b = resp @ T
+        self.b /= self.b.sum()
