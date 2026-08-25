@@ -240,9 +240,7 @@ class MemoryANNFit2Arm(RNNFit2ArmBase):
         choices_idx = torch.tensor(
             seg_choices - 1, dtype=torch.long, device=self.device
         )
-        rewards_t = torch.tensor(
-            seg_rewards.astype(np.float32), device=self.device
-        )
+        rewards_t = torch.tensor(seg_rewards.astype(np.float32), device=self.device)
         return choices_idx, rewards_t
 
     def _forward_segment(self, segment):
@@ -325,7 +323,8 @@ class MemoryANNFit2Arm(RNNFit2ArmBase):
 
         choices = checkpoint["choices"]
         probs = checkpoint.get(
-            "probs", np.zeros((len(choices), checkpoint["num_actions"]), dtype=np.float32)
+            "probs",
+            np.zeros((len(choices), checkpoint["num_actions"]), dtype=np.float32),
         )
         task = core.Bandit2Arm(
             probs=probs,
