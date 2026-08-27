@@ -85,6 +85,9 @@ class Qlearn3Regime(BasePolicy):
     def forget(self):
         pass
 
+    def get_state(self):
+        return self.b.copy()
+
     def _regime_choice_probs(self):
         p = self.params
         betas = (p["beta_0"], p["beta_1"], p["beta_2"])
@@ -177,6 +180,9 @@ class QlearnDiff1StayRegime(BasePolicy):
 
     def forget(self):
         pass
+
+    def get_state(self):
+        return self.b.copy()
 
     def _regime_choice_probs(self):
         p = self.params
@@ -278,6 +284,9 @@ class QlearnDiff3StayRegime(BasePolicy):
 
     def forget(self):
         pass
+
+    def get_state(self):
+        return self.b.copy()
 
     def _regime_choice_probs(self):
         p = self.params
@@ -486,6 +495,9 @@ class MoARegime(BasePolicy):
     def forget(self):
         pass
 
+    def get_state(self):
+        return self.b.copy()
+
     def _agent_values(self):
         return np.vstack([self.q_mbr, self.q_mbc, self.q_mfr, self.q_mfc])
 
@@ -660,6 +672,9 @@ class Qlearn2Regime(BasePolicy):
 
     def forget(self):
         pass
+
+    def get_state(self):
+        return self.b.copy()
 
     def _agent_values(self):
         return np.vstack([self.q1, self.q2])

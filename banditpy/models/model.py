@@ -1,4 +1,5 @@
 import copy
+import warnings
 import numpy as np
 import pandas as pd
 from scipy.special import logsumexp
@@ -544,6 +545,50 @@ class DecisionModel:
             self.beta_schedule.update()
 
         return probs
+
+    def get_state_trajectory(self):
+        """Per-trial internal policy state (e.g. an HMM belief 'b' over
+        latent regimes), for policies that expose one via 'get_state()'.
+
+        Teacher-forced on the real observed choice/reward history,
+        mirroring 'get_trial_nll()'/'predict_proba()''s trial loop. The
+        state recorded for trial t is the one *before* that trial's
+        update — i.e. the state that actually generated the observed
+        choice at t.
+
+        Returns
+        -------
+        np.ndarray or None, shape (n_trials, ...)
+            Stacked per-trial output of 'policy.get_state()'. None (with
+            a warning) if the policy doesn't override 'get_state()' —
+            most policies have no internal belief/state to extract.
+        """
+        self.policy.set_params(self.params)
+        self.policy.reset()
+        self.beta_schedule.reset()
+
+        if self.policy.get_state() is None:
+            warnings.warn(
+                f"{type(self.policy).__name__} does not implement 'get_state()' "
+                "— it has no internal belief/state to extract. Returning None.",
+                stacklevel=2,
+            )
+            return None
+
+        states = []
+
+        for c, r, reset in zip(self.choices, self.rewards, self.resets):
+            if reset:
+                self.policy.reset()
+                self.beta_schedule.reset()
+            else:
+                self.policy.forget()
+
+            states.append(self.policy.get_state())
+            self.policy.update(c, r)
+            self.beta_schedule.update()
+
+        return np.array(states)
 
     # -------------------- FIT --------------------
 
