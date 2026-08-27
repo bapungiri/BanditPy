@@ -1,3 +1,4 @@
+import warnings
 import numpy as np
 from .data_manager import DataManager
 from scipy import stats
@@ -546,7 +547,7 @@ class BanditTask(DataManager):
 
         return data
 
-    def auto_block_window_ids(self, time_window_min=40):
+    def auto_block_window_ids(self, time_window_min=40, drop_rogue_sessions=False):
         """
         Auto-generate window_ids and block_ids for each trial.
 
@@ -558,6 +559,14 @@ class BanditTask(DataManager):
         ----------
         time_window_min : int
             Time window in minutes for splitting blocks by datetime.
+        drop_rogue_sessions : bool, optional
+            A session is assumed to sit entirely inside one window; if an
+            unexpectedly long gap falls in the *middle* of a session instead
+            of between sessions, that session ends up tagged with more than
+            one block_id ("rogue"). Default False just warns and keeps the
+            data as-is. If True, drop that session's trials entirely
+            (recomputes all derived attributes, e.g. 'sessions'/
+            'ntrials_session', on the reduced data) and still warn.
 
         Returns
         -------
@@ -585,8 +594,42 @@ class BanditTask(DataManager):
         chunks = np.split(session_ids, np.cumsum(counts)[:-1])
         block_ids = np.concatenate([chunk - chunk[0] + 1 for chunk in chunks])
 
+        # A session (one fixed reward-probability stretch) is assumed to sit
+        # entirely inside a single window. If a long enough time gap falls
+        # in the middle of a session, it gets split across two windows and
+        # ends up tagged with two different block_ids — silently breaking
+        # anything downstream that groups trials by block_ids expecting a
+        # 1:1 session->block_id mapping (e.g. reshape-based block averaging).
+        session_block_counts = pd.Series(block_ids).groupby(session_ids).nunique()
+        rogue_sessions = session_block_counts[session_block_counts > 1].index.tolist()
+        if rogue_sessions:
+            if drop_rogue_sessions:
+                warnings.warn(
+                    f"Dropping {len(rogue_sessions)} session(s) that span "
+                    f"more than one window: {rogue_sessions}.",
+                    stacklevel=2,
+                )
+            else:
+                warnings.warn(
+                    f"{len(rogue_sessions)} session(s) span more than one window "
+                    f"and were assigned more than one block_id: {rogue_sessions}. "
+                    "This usually means an unexpectedly long time gap fell in "
+                    "the middle of a session rather than between sessions — "
+                    "check these session_ids before relying on block_ids, or "
+                    "pass drop_rogue_sessions=True to drop them automatically.",
+                    stacklevel=2,
+                )
+
         self.block_ids = block_ids
         self.window_ids = window_ids
+
+        if rogue_sessions and drop_rogue_sessions:
+            # Re-derive every trial-level attribute (and recompute 'sessions'/
+            # 'ntrials_session', etc., via __init__) rather than dropping
+            # rows in place, so nothing downstream is left stale.
+            keep_mask = ~np.isin(self.session_ids, rogue_sessions)
+            filtered = self._filtered(keep_mask)
+            self.__dict__.update(filtered.__dict__)
 
 
 class Bandit2Arm(BanditTask):
