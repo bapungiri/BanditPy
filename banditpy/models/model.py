@@ -1108,9 +1108,7 @@ class DecisionModel:
                     cv_test_nll_per_trial=self.cv_test_nll_per_trial_,
                     cv_pseudo_r2=self.cv_pseudo_r2_,
                     cv_test_accuracy=self.cv_test_accuracy_,
-                    cv_train_nll_per_trial_mean=float(
-                        cv["train_nll_per_trial"].mean()
-                    ),
+                    cv_train_nll_per_trial_mean=float(cv["train_nll_per_trial"].mean()),
                     cv_train_nll_per_trial_std=float(cv["train_nll_per_trial"].std()),
                     cv_test_nll_per_trial_mean=float(cv["test_nll_per_trial"].mean()),
                     cv_test_nll_per_trial_std=float(cv["test_nll_per_trial"].std()),
