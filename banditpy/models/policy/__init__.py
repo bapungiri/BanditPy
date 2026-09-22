@@ -26,4 +26,7 @@ from .regime import (
     QlearnDiff3StayRegime,
     MoARegime,
     Qlearn2Regime,
+    RewardRateGatedRegime,
+    VolatilityGatedRegime,
+    SupervisedMoERegime,
 )

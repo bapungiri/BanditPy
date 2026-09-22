@@ -958,6 +958,156 @@ class DecisionModel:
             metadata=metadata,
         )
 
+    # -------------------- REGIME GROUND-TRUTH SIM --------------------
+
+    @classmethod
+    def simulate_regime_path(
+        cls,
+        policy,
+        block_probs,
+        block_regimes,
+        n_trials_per_block,
+        params=None,
+        session_boundaries=None,
+        seed=None,
+        metadata=None,
+    ):
+        """
+        Simulate ground-truth data from a regime-belief policy (e.g.
+        `Qlearn3Regime`) with an EXTERNALLY SPECIFIED, block-locked regime
+        path, instead of one driven by the policy's own fitted transition
+        matrix. For parameter/assignment-recovery studies: the true
+        generative regime for each block is known by construction (e.g.
+        tied to that block's reward-probability combination), so after
+        fitting blind, the recovered params/belief trajectory can be
+        checked against this known path.
+
+        Forces `policy.b` to a one-hot vector at the trial's true regime
+        index right before `logits()`/`update()` each trial. Since
+        `resp = b * lik` renormalized, a one-hot `b` stays one-hot after
+        normalization regardless of `lik` — so only that regime's internal
+        state updates and `logits()` reduces to exactly that regime's own
+        choice distribution. This reuses the policy's real update
+        equations rather than re-deriving them, and never invokes the
+        policy's own fitted transition dynamics to advance `b` — the
+        caller controls the regime sequence directly.
+
+        Q-values persist across non-adjacent blocks sharing the same true
+        regime (only reset at `session_boundaries`, default: none besides
+        the start) — matching the `reset_mode="window"` convention used
+        when fitting these classes to real data, where the whole point is
+        inferring a persistent per-regime memory that outlives an
+        individual block. A `session_boundaries` entry resets Q-values/
+        belief, letting you concatenate independent simulated
+        sessions/windows if wanted.
+
+        Args:
+            policy: A regime-belief `BasePolicy` instance exposing `self.b`
+                (e.g. `Qlearn3Regime`, `QlearnDiff3StayRegime`, `MoARegime`,
+                `Qlearn2Regime`). Mutated in place.
+            block_probs: Sequence of `(p1, p2)` reward probabilities, one
+                per block.
+            block_regimes: Sequence of int, true regime index per block
+                (0-based, `< len(policy.b)`).
+            n_trials_per_block: Int or sequence giving trials per block.
+            params: Optional flat dict of ground-truth parameters for the
+                policy (and its beta_schedule). If None, assumes both were
+                already configured via `set_params()`.
+            session_boundaries: Optional sequence of block indices
+                (0-based) at which to reset Q-values/belief, in addition to
+                block 0 (always a reset).
+            seed: RNG seed for reproducibility.
+            metadata: Optional metadata stored on the returned `Bandit2Arm`.
+
+        Returns:
+            task (Bandit2Arm): Simulated task (probs, choices, rewards,
+                session/block ids). `session_ids` increment at each
+                `session_boundaries` entry; `block_ids` increment every
+                block.
+            true_regime (np.ndarray): Per-trial true regime index, same
+                length as `task.choices` — the ground truth to check
+                inferred belief/occupancy against.
+        """
+        beta_schedule = policy.beta_schedule
+
+        rng = np.random.default_rng(seed)
+
+        if params is not None:
+            policy.set_params(params)
+        elif not policy.params:
+            raise ValueError(
+                "params is None and policy has no parameters set; "
+                "call policy.set_params(...) or provide params"
+            )
+
+        policy.reset()  # populates 'b'; validated and re-run below (block 0 always resets)
+        if not hasattr(policy, "b"):
+            raise ValueError(
+                "policy must expose a belief vector 'b' (regime-belief policy)"
+            )
+
+        n_blocks = len(block_probs)
+        if isinstance(n_trials_per_block, int):
+            n_trials_per_block = [n_trials_per_block] * n_blocks
+
+        assert len(block_regimes) == n_blocks
+        assert len(n_trials_per_block) == n_blocks
+
+        boundaries = set(int(b) for b in (session_boundaries or ()))
+        boundaries.add(0)
+
+        n_states = len(policy.b)
+
+        probs_list, choices, rewards = [], [], []
+        session_ids, block_ids, true_regime = [], [], []
+
+        session_counter = 0
+        for b, ((p1, p2), k, n_trials) in enumerate(
+            zip(block_probs, block_regimes, n_trials_per_block)
+        ):
+            if b in boundaries:
+                policy.reset()
+                beta_schedule.reset()
+                session_counter += 1
+
+            one_hot = np.zeros(n_states)
+            one_hot[k] = 1.0
+
+            for _ in range(n_trials):
+                policy.b = one_hot.copy()
+                logits = policy.logits()
+                c = softmax_sample(
+                    logits,
+                    beta=beta_schedule.get_beta(),
+                    rng=rng,
+                    epsilon=beta_schedule.get_epsilon(),
+                )
+                r = int(rng.random() < [p1, p2][c])
+
+                policy.update(c, r)
+                beta_schedule.update()
+
+                probs_list.append([p1, p2])
+                choices.append(c + 1)
+                rewards.append(r)
+                session_ids.append(session_counter)
+                block_ids.append(b + 1)
+                true_regime.append(k)
+
+        task = Bandit2Arm(
+            probs=np.asarray(probs_list),
+            choices=np.asarray(choices),
+            rewards=np.asarray(rewards),
+            session_ids=np.asarray(session_ids),
+            block_ids=np.asarray(block_ids),
+            window_ids=None,
+            starts=None,
+            stops=None,
+            datetime=None,
+            metadata=metadata,
+        )
+        return task, np.asarray(true_regime)
+
     # -------------------- GREEDY SIM --------------------
 
     def simulate_greedy(self):
