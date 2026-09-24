@@ -5,6 +5,47 @@ from ._common import TRIAL_COLUMNS, assemble, resolve_files
 
 CSV_SUFFIX = ".trial.csv"
 
+CSV_COLUMNS = [
+    "eventCode",
+    "port1Prob",
+    "port2Prob",
+    "chosenPort",
+    "rewarded",
+    "trialId",
+    "blockId",
+    "unstructuredProb",
+    "sessionStartEpochMs",
+    "blockStartRelMs",
+    "trialStartRelMs",
+    "trialEndRelMs",
+]
+
+
+def read_trial_csv(fp):
+    """Read a '.trial.csv', supplying column names when it has no header.
+
+    The AutoTrainer omits the header whenever it rotates its log
+    mid-session, so the continuation file starts straight at a data row and
+    would otherwise have its first trial consumed as the header.
+
+    Parameters
+    ----------
+    fp : Path
+
+    Returns
+    -------
+    pd.DataFrame
+        Raw file contents, always with the columns named.
+    """
+    with open(fp) as f:
+        first = f.readline()
+
+    if not first.strip():
+        return pd.DataFrame(columns=CSV_COLUMNS)
+    if first.startswith(CSV_COLUMNS[0]):
+        return pd.read_csv(fp, sep=",")
+    return pd.read_csv(fp, sep=",", header=None, names=CSV_COLUMNS)
+
 
 def csv_trials(fp):
     """Read one '.trial.csv' file into the canonical per-trial table.
@@ -20,7 +61,7 @@ def csv_trials(fp):
     -------
     pd.DataFrame
     """
-    data = pd.read_csv(fp, sep=",")
+    data = read_trial_csv(fp)
     data = data[
         (data["eventCode"].astype(str).str.contains("200"))
         & (data["chosenPort"].isin([1, 2]))
