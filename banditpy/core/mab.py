@@ -1167,45 +1167,60 @@ class Bandit2Arm(BanditTask):
         return h, bins[:-1] + bin_size / 2
 
     def get_performance_prob_grid(
-        self, n_last_trials=5, performance_metric="optimal_choice"
+        self, n_last_trials=5, performance_metric="optimal_choice", min_sessions=2
     ):
-        """Get performance grid based on reward probabilities.
+        """Get performance for every (order-independent) reward probability pair.
+
+        Each cell is the mean of the last `n_last_trials` positions of that
+        pair's session-averaged performance curve (see `get_performance`).
+        Positions are trial positions within a session, so sessions should
+        have equal length (e.g. `filter_by_trials(min_trials=100,
+        clip_max=100)`) — otherwise the tail of the curve is dominated by the
+        longest sessions.
 
         Parameters
         ----------
         n_last_trials : int, optional
-            Number of last trials to consider for performance calculation, by default 5
-        performance_metric : str, optional
-            Metric to use for performance calculation, by default "optimal_choice"
+            Number of trailing curve positions to average, by default 5.
+        performance_metric : {"optimal_choice", "reward_rate"}, optional
+            "optimal_choice" = P(chose higher-probability arm), "reward_rate"
+            = P(rewarded). Default "optimal_choice".
+        min_sessions : int, optional
+            Pairs with fewer sessions than this are NaN, by default 2 (same as
+            the previous "more than 100 trials" rule for 100-trial sessions).
 
         Returns
         -------
-        performance_grid : 2D array
-            Grid of performance values.
-        xedges : 1D array
-            Edges of the bins along the x-axis.
-        yedges : 1D array
-            Edges of the bins along the y-axis.
+        perf_mat : 2D array, shape (n_probs, n_probs)
+            Symmetric grid, perf_mat[i, j] for probabilities
+            (unique_probs[i], unique_probs[j]). NaN for pairs with too few
+            sessions and on the diagonal (equal probabilities have no higher
+            arm, so "optimal choice" is undefined there).
+        unique_probs : 1D array
+            Sorted unique arm probabilities indexing both axes.
         """
+        metrics = {"optimal_choice": "choice", "reward_rate": "reward"}
+        if performance_metric not in metrics:
+            raise ValueError(f"performance_metric must be one of {list(metrics)}")
+
         probs = self.probs
         unique_probs = np.unique(probs.flatten())
+        n = len(unique_probs)
+        perf_mat = np.full((n, n), np.nan)
 
-        perf_mat = np.zeros((len(unique_probs), len(unique_probs)))
+        for i1 in range(n):
+            for i2 in range(i1 + 1, n):  # upper triangle; mirrored below
+                p1, p2 = unique_probs[i1], unique_probs[i2]
+                mask = ((probs[:, 0] == p1) & (probs[:, 1] == p2)) | (
+                    (probs[:, 0] == p2) & (probs[:, 1] == p1)
+                )
+                if np.unique(self.session_ids[mask]).size < min_sessions:
+                    continue
 
-        for i1, p1 in enumerate(unique_probs):
-            for i2, p2 in enumerate(unique_probs):
-                p1p2_mask = (probs[:, 0] == p1) & (probs[:, 1] == p2)
-                p2p1_mask = (probs[:, 0] == p2) & (probs[:, 1] == p1)
-                mask = p1p2_mask | p2p1_mask
-
-                if mask.sum() > 100:
-                    task_p1p2 = self._filtered(mask)
-                    if performance_metric == "optimal_choice":
-                        perf_p1p2 = task_p1p2.get_performance(by="choice")
-                    if performance_metric == "reward_rate":
-                        perf_p1p2 = task_p1p2.get_performance(by="reward")
-
-                    perf_mat[i1, i2] = perf_p1p2[-n_last_trials:].mean()
+                perf = self._filtered(mask).get_performance(
+                    by=metrics[performance_metric]
+                )
+                perf_mat[i1, i2] = perf_mat[i2, i1] = perf[-n_last_trials:].mean()
 
         return perf_mat, unique_probs
 
