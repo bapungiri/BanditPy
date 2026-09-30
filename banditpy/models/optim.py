@@ -81,9 +81,22 @@ class DEOptimizer(BaseOptimizer):
 
 
 class OptunaOptimizer(BaseOptimizer):
+    """Multi-start Optuna search, one independent study per seed.
+
+    'log_params' names parameters sampled on a log scale (e.g. "beta");
+    their lower bound must be > 0. Names not being fitted are ignored.
+    """
+
     def __init__(
-        self, n_trials=100, timeout=None, sampler=None, pruner=None, show_progress=False
+        self,
+        n_trials=100,
+        timeout=None,
+        sampler=None,
+        pruner=None,
+        show_progress=False,
+        log_params=(),
     ):
+        self.log_params = frozenset(log_params)
         self.n_trials = n_trials
         self.timeout = timeout
         self.sampler = sampler
@@ -121,13 +134,20 @@ class OptunaOptimizer(BaseOptimizer):
                 return optuna.pruners.NopPruner()
             return self.pruner
 
+        for name, (low, _) in bounds:
+            if name in self.log_params and low <= 0:
+                raise ValueError(
+                    f"log-scale parameter '{name}' needs a lower bound > 0, got {low}"
+                )
+
         def _run(seed):
             sampler = _make_sampler(seed)
             pruner = _make_pruner()
 
             def _objective(trial):
                 theta = [
-                    trial.suggest_float(name, low, high) for name, (low, high) in bounds
+                    trial.suggest_float(name, low, high, log=name in self.log_params)
+                    for name, (low, high) in bounds
                 ]
                 return objective(theta)
 

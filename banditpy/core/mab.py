@@ -139,13 +139,24 @@ class BanditTask(DataManager):
 
     @staticmethod
     def _fix_choices(choices):
+        """Return 1-based choices. 0-based input (contains a 0) is shifted by 1.
+
+        Only the presence of a 0 decides this: shifting by 'choices.min()'
+        would relabel a sequence that never picked arm 1 (e.g. all 2s) as
+        arm 1. All-1 input is ambiguous and is read as 1-based, so pass
+        1-based choices whenever possible.
+        """
         choices = np.squeeze(choices)
-        return choices - choices.min() + 1
+        if choices.min() < 0:
+            raise ValueError(f"choices must be non-negative, got min {choices.min()}")
+        return choices + 1 if choices.min() == 0 else choices
 
     @staticmethod
     def _fix_rewards(rewards):
         rewards = np.squeeze(rewards)
-        return rewards - rewards.min()
+        if rewards.min() < 0:
+            raise ValueError(f"rewards must be non-negative, got min {rewards.min()}")
+        return rewards
 
     @staticmethod
     def _fix_datetime(datetime):
