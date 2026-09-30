@@ -11,7 +11,6 @@ from .beta_schedule import (
 from .ucb import EmpiricalUCB, RLUCB, BayesianUCB, RLBayesianUCB
 from .qlearn import (
     Qlearn,
-    QlearnSticky,
     QlearnHierarchical,
     QlearnWM,
     QlearnDynamicLR,

@@ -15,15 +15,27 @@ def _softmax(x: np.ndarray, beta: float) -> np.ndarray:
 
 class Qlearn(BasePolicy):
     """
-    2-arm Q-learning with counterfactual updates and a port bias term.
+    2-arm Q-learning with counterfactual updates, a port bias term and an
+    optional perseverance (sticky) term.
 
     Update rule:
     Q[choice] += alpha_c * (reward - Q[choice])
     Q[unchosen] += alpha_u * (reward - Q[choice])
+    h += alpha_h * (choice - h)          # choice trace, 0 = arm 0, 1 = arm 1
 
     Choice logits:
-    logit[0] = Q[0] + bias
-    logit[1] = Q[1] - bias
+    logit[0] = Q[0] + bias + sticky * (0.5 - h)
+    logit[1] = Q[1] - bias + sticky * (h - 0.5)
+
+    'sticky' > 0 favours repeating recent choices, < 0 favours alternating.
+    'alpha_h' and 'sticky' are disabled by default ('sticky' = 0 makes the
+    trace a no-op), so the default model is plain Q-learning with a bias.
+    Enable/disable parameters to fit other variants, e.g.::
+
+        policy = Qlearn()
+        policy.params.alpha_h.enable()
+        policy.params.sticky.enable()   # + perseverance
+        policy.params.bias.disable()    # without port bias (bias = 0)
     """
 
     class Params(ParameterGroup):
@@ -36,18 +48,34 @@ class Qlearn(BasePolicy):
         bias = ParameterSpec(
             "bias", (-2.0, 2.0), default=0.0, description="Bias toward port 0 vs port 1"
         )
+        alpha_h = ParameterSpec(
+            "alpha_h",
+            (0.0, 1.0),
+            default=0.0,
+            active=False,
+            description="Learning rate of the choice (perseverance) trace",
+        )
+        sticky = ParameterSpec(
+            "sticky",
+            (-2.0, 2.0),
+            default=0.0,
+            active=False,
+            description="Perseverance weight (> 0 repeat, < 0 alternate)",
+        )
 
     params: Params
 
     def reset(self):
         self.q = np.full(2, 0.5)
+        self.h = 0.5
 
     def forget(self):
         pass
 
     def logits(self):
         b = self.params["bias"]
-        return np.array([self.q[0] + b, self.q[1] - b])
+        stick = self.params["sticky"] * (self.h - 0.5)
+        return np.array([self.q[0] + b - stick, self.q[1] - b + stick])
 
     def update(self, choice, reward):
         a_c = self.params["alpha_c"]
@@ -61,72 +89,7 @@ class Qlearn(BasePolicy):
 
         self.q[:] = np.clip(self.q, 0.0, 1.0)
 
-
-class QlearnSticky(BasePolicy):
-    """Qlearn with a perseverance (sticky) term for the propensity to choose
-    the same port irrespective of reward, plus a static port bias term."""
-
-    class Params(ParameterGroup):
-        alpha_c = ParameterSpec(
-            "alpha_c", (-1.0, 1.0), description="Learning rate (chosen)"
-        )
-        alpha_u = ParameterSpec(
-            "alpha_u", (-1.0, 1.0), description="Learning rate (unchosen)"
-        )
-        alpha_h = ParameterSpec(
-            "alpha_h", (0.0, 1.0), description="Perseverance learning"
-        )
-        scaler = ParameterSpec("scaler", (1, 10.0), description="Perseverance scale")
-        bias = ParameterSpec(
-            "bias", (-2.0, 2.0), default=0.0, description="Bias toward port 0 vs port 1"
-        )
-
-    params: Params
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-
-    def reset(self):
-        self.q0 = 0.5
-        self.q = np.array([self.q0, self.q0], dtype=float)
-        self.h = 0.5
-
-        p = self.params
-        self._ac = p["alpha_c"]
-        self._au = p["alpha_u"]
-        self._ah = p["alpha_h"]
-        self._sc = p["scaler"]
-
-    def forget(self):
-        return
-
-    def logits(self):
-        h = self.h
-        stick0 = h - 0.5
-        stick1 = 0.5 - h
-        b = self.params["bias"]
-        return np.array(
-            (
-                self.q[0] + self.params["scaler"] * stick0 + b,
-                self.q[1] + self.params["scaler"] * stick1 - b,
-            ),
-            dtype=float,
-        )
-
-    def update(self, choice, reward):
-        p = self.params
-        other = 1 - choice
-
-        rpe = reward - self.q[choice]
-
-        self.q[choice] += p["alpha_c"] * rpe
-        self.q[other] += p["alpha_u"] * rpe
-
-        # fast in-place clamp
-        np.minimum(self.q, 1.0, out=self.q)
-        np.maximum(self.q, 0.0, out=self.q)
-
-        self.h += p["alpha_h"] * (choice - self.h)
+        self.h += self.params["alpha_h"] * (choice - self.h)
 
 
 class QlearnHierarchical(BasePolicy):
