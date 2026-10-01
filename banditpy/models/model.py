@@ -28,6 +28,20 @@ def softmax_sample(logits, beta, rng, epsilon=0.0):
     return rng.choice(len(p), p=p)
 
 
+def _optimizer_info(optimizer, n_starts, early_stop, seed):
+    """Describe how a fit was run, for saving alongside its parameters."""
+    opt = resolve_optimizer(optimizer)
+    log_params = sorted(getattr(opt, "log_params", ()))
+    return dict(
+        optimizer=type(opt).__name__,
+        n_starts=int(n_starts),
+        optimizer_n_trials=getattr(opt, "n_trials", None),  # Optuna only
+        optimizer_log_params=",".join(log_params) if log_params else None,
+        early_stop=bool(early_stop),
+        fit_seed=None if seed is None else int(seed),
+    )
+
+
 def _get_slurm_cpus(default=1):
     for var in ("SLURM_CPUS_PER_TASK", "SLURM_JOB_CPUS_PER_NODE"):
         if var in os.environ:
@@ -409,8 +423,10 @@ class DecisionModel:
         self.fit_fvals = None
         self.fit_fval_mean = None
         self.fit_fval_std = None
+        self.fit_info = {}  # how fit() was run (optimizer, n_starts, ...)
 
         self.cv_results_ = None
+        self.cv_fit_info = {}  # same, for cross_validate()
         self.cv_test_nll_ = None
         self.cv_test_nll_per_trial_ = None
         self.cv_pseudo_r2_ = None
@@ -604,6 +620,7 @@ class DecisionModel:
         es_check_every=250,  # check every 250 trials after warmup
         es_slack=0.01,  # Keep if within 1% of best NLL seen so far
     ):
+        self.fit_info = _optimizer_info(optimizer, n_starts, early_stop, seed)
         self.params, self.nll, self.fit_fvals = _fit_core(
             self.policy,
             self.choices,
@@ -692,6 +709,7 @@ class DecisionModel:
                 f"reset segments ({len(unique_groups)})."
             )
 
+        self.cv_fit_info = _optimizer_info(optimizer, n_starts, early_stop, seed)
         rng = np.random.default_rng(seed)
         shuffled_groups = rng.permutation(unique_groups)
         fold_groups = np.array_split(shuffled_groups, n_folds)
@@ -1248,6 +1266,7 @@ class DecisionModel:
                 beta_schedule_type=self.beta_schedule.__class__.__name__,
             )
         )
+        out.update(self.fit_info)
 
         if self.cv_results_ is not None:
             cv = self.cv_results_
@@ -1268,6 +1287,7 @@ class DecisionModel:
                     cv_test_accuracy_std=float(cv["test_accuracy"].std()),
                 )
             )
+            out.update({f"cv_{k}": v for k, v in self.cv_fit_info.items()})
 
             # Per-parameter mean/std across folds — a stability check: a
             # parameter that swings wildly across folds is poorly
