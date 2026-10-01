@@ -46,7 +46,7 @@ class Qlearn(BasePolicy):
             "alpha_u", (-0.99, 0.99), description="Learning rate for unchosen option"
         )
         bias = ParameterSpec(
-            "bias", (-2.0, 2.0), default=0.0, description="Bias toward port 0 vs port 1"
+            "bias", (-1.0, 1.0), default=0.0, description="Bias toward port 0 vs port 1"
         )
         alpha_h = ParameterSpec(
             "alpha_h",
@@ -57,7 +57,7 @@ class Qlearn(BasePolicy):
         )
         sticky = ParameterSpec(
             "sticky",
-            (-2.0, 2.0),
+            (-1.0, 1.0),
             default=0.0,
             active=False,
             description="Perseverance weight (> 0 repeat, < 0 alternate)",
@@ -383,7 +383,7 @@ class QlearnAdaptiveLR(BasePolicy):
             description="EWMA weight for the reward-rate trace",
         )
         bias = ParameterSpec(
-            "bias", (-2.0, 2.0), default=0.0, description="Bias toward port 0 vs port 1"
+            "bias", (-1.0, 1.0), default=0.0, description="Bias toward port 0 vs port 1"
         )
 
     params: Params
@@ -446,7 +446,7 @@ class QlearnDiff(BasePolicy):
         )
 
         bias = ParameterSpec(
-            "bias", (-2.0, 2.0), default=0.0, description="Bias toward port 0 vs port 1"
+            "bias", (-1.0, 1.0), default=0.0, description="Bias toward port 0 vs port 1"
         )
 
     params: Params
