@@ -65,8 +65,12 @@ class Qlearn(BasePolicy):
 
     params: Params
 
+    # Plain Python floats instead of 2-element numpy arrays: these run once
+    # per trial in every NLL evaluation, where numpy's per-call overhead
+    # (np.clip, array construction) dominates the arithmetic.
+
     def reset(self):
-        self.q = np.full(2, 0.5)
+        self.q = [0.5, 0.5]
         self.h = 0.5
 
     def forget(self):
@@ -75,7 +79,7 @@ class Qlearn(BasePolicy):
     def logits(self):
         b = self.params["bias"]
         stick = self.params["sticky"] * (self.h - 0.5)
-        return np.array([self.q[0] + b - stick, self.q[1] - b + stick])
+        return (self.q[0] + b - stick, self.q[1] - b + stick)
 
     def update(self, choice, reward):
         a_c = self.params["alpha_c"]
@@ -84,10 +88,10 @@ class Qlearn(BasePolicy):
         other = 1 - choice
         pe = reward - self.q[choice]
 
-        self.q[choice] += a_c * pe
-        self.q[other] += a_u * pe
-
-        self.q[:] = np.clip(self.q, 0.0, 1.0)
+        q_c = self.q[choice] + a_c * pe
+        q_o = self.q[other] + a_u * pe
+        self.q[choice] = min(max(q_c, 0.0), 1.0)
+        self.q[other] = min(max(q_o, 0.0), 1.0)
 
         self.h += self.params["alpha_h"] * (choice - self.h)
 

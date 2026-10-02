@@ -2,23 +2,35 @@ import copy
 import warnings
 import numpy as np
 import pandas as pd
-from scipy.special import logsumexp
 from banditpy.core import Bandit2Arm
 from .policy.base import BasePolicy
 from tqdm import tqdm
+import math
 import os
 from .optim import resolve_optimizer
 
+# These run once per trial inside every likelihood evaluation, so they avoid
+# scipy.special.logsumexp: its array-API checks cost ~50 us per call on a
+# 2-element array, ~85% of a Qlearn NLL evaluation.
+
 
 def _softmax_probs(logits, beta, epsilon=0.0):
-    z = beta * logits
-    p = np.exp(z - logsumexp(z))
+    z = beta * np.asarray(logits, dtype=float)
+    e = np.exp(z - z.max())
+    p = e / e.sum()
     if epsilon > 0:
         p = (1 - epsilon) * p + epsilon / len(p)
     return p
 
 
 def softmax_loglik(logits, choice, beta, epsilon=0.0):
+    if len(logits) == 2:
+        # 2-arm softmax is a logistic of the logit difference; plain floats.
+        d = beta * (float(logits[1 - choice]) - float(logits[choice]))
+        p = 1.0 / (1.0 + math.exp(d)) if d < 700.0 else 0.0  # avoid overflow
+        if epsilon > 0:
+            p = (1 - epsilon) * p + epsilon / 2
+        return math.log(p + 1e-12)
     p = _softmax_probs(logits, beta, epsilon)
     return np.log(p[choice] + 1e-12)
 
