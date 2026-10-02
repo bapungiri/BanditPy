@@ -27,7 +27,9 @@ class Qlearn(BasePolicy):
     logit[0] = Q[0] + bias + sticky * (0.5 - h)
     logit[1] = Q[1] - bias + sticky * (h - 0.5)
 
-    'sticky' > 0 favours repeating recent choices, < 0 favours alternating.
+    'sticky' >= 0 favours repeating recent choices (perseverance only; no
+    alternation). It is allowed above 1, where perseverance can outweigh
+    any Q-value difference: fitted animals sat at a +1 bound.
     'alpha_h' and 'sticky' are disabled by default ('sticky' = 0 makes the
     trace a no-op), so the default model is plain Q-learning with a bias.
     Enable/disable parameters to fit other variants, e.g.::
@@ -57,10 +59,10 @@ class Qlearn(BasePolicy):
         )
         sticky = ParameterSpec(
             "sticky",
-            (-1.0, 1.0),
+            (0.0, 10.0),
             default=0.0,
             active=False,
-            description="Perseverance weight (> 0 repeat, < 0 alternate)",
+            description="Perseverance weight (repeat recent choices)",
         )
 
     params: Params

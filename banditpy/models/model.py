@@ -633,6 +633,11 @@ class DecisionModel:
         es_slack=0.01,  # Keep if within 1% of best NLL seen so far
     ):
         self.fit_info = _optimizer_info(optimizer, n_starts, early_stop, seed)
+        bounds = self.policy.get_bounds()
+        self.fit_info["fit_bounds"] = ", ".join(
+            f"{n}: [{bounds[n][0]:g}, {bounds[n][1]:g}]"
+            for n in self.policy.active_parameter_names()
+        )
         self.params, self.nll, self.fit_fvals = _fit_core(
             self.policy,
             self.choices,
