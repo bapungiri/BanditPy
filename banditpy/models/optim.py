@@ -17,15 +17,47 @@ class BaseOptimizer:
         raise NotImplementedError
 
 
+def _fun_and_grad(objective, lo, hi):
+    """Objective plus a forward-difference gradient, computed as scipy's
+    default '2-point' scheme does (same step, flipped at an upper bound),
+    so fits are unchanged. Supplying it ourselves lets us clip x to the
+    bounds first: scipy 1.15's L-BFGS-B occasionally hands back an x a
+    hair outside them, and its own gradient code then raises "'x0'
+    violates bound constraints", killing the whole multi-start fit.
+    """
+    rel_step = np.sqrt(np.finfo(float).eps)
+
+    def fg(x):
+        x = np.clip(x, lo, hi)
+        f = objective(x)
+        g = np.empty_like(x)
+        for i in range(x.size):
+            h = rel_step * (1.0 if x[i] >= 0 else -1.0) * max(1.0, abs(x[i]))
+            if x[i] + h > hi[i] or x[i] + h < lo[i]:
+                h = -h
+            xh = x.copy()
+            xh[i] = x[i] + h
+            g[i] = (objective(xh) - f) / (xh[i] - x[i])
+        return f, g
+
+    return fg
+
+
 class LBFGSOptimizer(BaseOptimizer):
     def fit(self, objective, bounds, seeds, n_jobs=1, progress=False):
         lo_hi = [b for _, b in bounds]
+        lo, hi = np.array(lo_hi, dtype=float).T
+        fg = _fun_and_grad(objective, lo, hi)
 
         def _run(seed):
             rng = np.random.default_rng(seed)
             x0 = np.array([rng.uniform(*b) for b in lo_hi])
-            res = minimize(objective, x0, method="L-BFGS-B", bounds=lo_hi)
-            return res.fun, res.x
+            try:
+                res = minimize(fg, x0, jac=True, method="L-BFGS-B", bounds=lo_hi)
+            except Exception as err:  # one bad start shouldn't sink the others
+                print(f"L-BFGS-B start {seed} failed: {err!r}")
+                return np.nan, x0
+            return res.fun, np.clip(res.x, lo, hi)
 
         iterator = seeds
         if progress and n_jobs == 1:
@@ -38,9 +70,11 @@ class LBFGSOptimizer(BaseOptimizer):
                 delayed(_run)(s) for s in iterator
             )
 
-        best_fun, best_x = min(results, key=lambda t: t[0])
         fvals = np.array([r[0] for r in results], dtype=float)
-        return best_fun, best_x, fvals
+        if np.isnan(fvals).all():
+            raise RuntimeError("All L-BFGS-B starts failed")
+        best = int(np.nanargmin(fvals))
+        return fvals[best], results[best][1], fvals
 
 
 class DEOptimizer(BaseOptimizer):

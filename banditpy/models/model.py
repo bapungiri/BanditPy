@@ -653,8 +653,9 @@ class DecisionModel:
             es_check_every=es_check_every,
             es_slack=es_slack,
         )
-        self.fit_fval_mean = float(self.fit_fvals.mean())
-        self.fit_fval_std = float(self.fit_fvals.std())
+        # nan marks a failed optimizer start
+        self.fit_fval_mean = float(np.nanmean(self.fit_fvals))
+        self.fit_fval_std = float(np.nanstd(self.fit_fvals))
 
     # -------------------- CROSS-VALIDATION --------------------
 
