@@ -1,3 +1,4 @@
+import math
 import numpy as np
 from .base import BasePolicy, ParameterGroup, ParameterSpec
 from .beta_schedule import NoBeta
@@ -17,6 +18,14 @@ def _softmax(x: np.ndarray, beta: float) -> np.ndarray:
 
 def _sigmoid(z: float) -> float:
     return 1.0 / (1.0 + np.exp(-z))
+
+
+def _logistic(d: float) -> float:
+    """1 / (1 + exp(-d)) on plain floats, overflow-safe."""
+    if d >= 0:
+        return 1.0 / (1.0 + math.exp(-d))
+    e = math.exp(d)
+    return e / (1.0 + e)
 
 
 class Qlearn3Regime(BasePolicy):
@@ -732,20 +741,34 @@ class Qlearn2Regime(BasePolicy):
 
     params: Params
 
+    # The per-trial methods (logits/update) use plain Python floats: with 2
+    # agents x 2 regimes x 2 actions, numpy's per-call overhead on tiny
+    # arrays dominated the NLL evaluation. Same maths as the array helpers
+    # (_regime_choice_probs etc.), which are kept for other callers.
+
     def reset(self):
-        self.q1 = np.full(2, 0.5)
-        self.q2 = np.full(2, 0.5)
+        self.q1 = [0.5, 0.5]
+        self.q2 = [0.5, 0.5]
         self.q_bias = np.array([1.0, -1.0])
-        self.b = np.full(2, 0.5)
+        self.b = [0.5, 0.5]
 
     def forget(self):
         pass
 
     def get_state(self):
-        return self.b.copy()
+        return np.array(self.b, dtype=float)
+
+    def _regime_p0(self):
+        """P(choose arm 0 | regime k) for k = 0, 1 (2-way softmax = logistic)."""
+        p = self.params
+        q1, q2, bb = self.q1, self.q2, p["beta_bias"]
+        # V_k(0) - V_k(1); the bias agent contributes beta_bias * (1 - (-1)).
+        d0 = p["beta_q1_0"] * (q1[0] - q1[1]) + p["beta_q2_0"] * (q2[0] - q2[1]) + 2.0 * bb
+        d1 = p["beta_q1_1"] * (q1[0] - q1[1]) + p["beta_q2_1"] * (q2[0] - q2[1]) + 2.0 * bb
+        return _logistic(d0), _logistic(d1)
 
     def _agent_values(self):
-        return np.vstack([self.q1, self.q2])
+        return np.vstack([np.asarray(self.q1, float), np.asarray(self.q2, float)])
 
     def _regime_betas(self):
         p = self.params
@@ -768,10 +791,14 @@ class Qlearn2Regime(BasePolicy):
         return np.vstack([_softmax(V[k], 1.0) for k in range(2)])
 
     def logits(self):
-        opt_probs = self._regime_choice_probs()
-        p_action = self.b @ opt_probs
-        p_action = np.clip(p_action, 1e-9, 1.0)
-        return np.log(p_action)
+        p0_r0, p0_r1 = self._regime_p0()
+        b0, b1 = self.b
+        p_arm0 = b0 * p0_r0 + b1 * p0_r1
+        p_arm1 = b0 * (1.0 - p0_r0) + b1 * (1.0 - p0_r1)
+        return (
+            math.log(min(max(p_arm0, 1e-9), 1.0)),
+            math.log(min(max(p_arm1, 1e-9), 1.0)),
+        )
 
     def _transition_matrix(self):
         p = self.params
@@ -779,32 +806,36 @@ class Qlearn2Regime(BasePolicy):
         return np.array([[s0, 1.0 - s0], [1.0 - s1, s1]])
 
     def update(self, choice, reward):
-        opt_probs = self._regime_choice_probs()
-        lik = opt_probs[:, choice]
+        p0_r0, p0_r1 = self._regime_p0()
+        lik0 = p0_r0 if choice == 0 else 1.0 - p0_r0
+        lik1 = p0_r1 if choice == 0 else 1.0 - p0_r1
 
-        resp = self.b * lik
-        resp_sum = resp.sum()
+        r0, r1 = self.b[0] * lik0, self.b[1] * lik1
+        resp_sum = r0 + r1
         if resp_sum <= 0:
-            resp = np.full(2, 0.5)
+            r0 = r1 = 0.5
         else:
-            resp /= resp_sum
+            r0, r1 = r0 / resp_sum, r1 / resp_sum
 
         p = self.params
         other = 1 - choice
 
         # unconditional agent updates — not scaled by resp
-        pe1 = reward - self.q1[choice]
-        self.q1[choice] += p["alpha_c_1"] * pe1
-        self.q1[other] += p["alpha_u_1"] * pe1
-        np.clip(self.q1, 0.0, 1.0, out=self.q1)
+        q1, q2 = self.q1, self.q2
+        pe1 = reward - q1[choice]
+        c1, o1 = q1[choice] + p["alpha_c_1"] * pe1, q1[other] + p["alpha_u_1"] * pe1
+        q1[choice], q1[other] = min(max(c1, 0.0), 1.0), min(max(o1, 0.0), 1.0)
 
-        pe2 = reward - self.q2[choice]
-        self.q2[choice] += p["alpha_c_2"] * pe2
-        self.q2[other] += p["alpha_u_2"] * pe2
-        np.clip(self.q2, 0.0, 1.0, out=self.q2)
+        pe2 = reward - q2[choice]
+        c2, o2 = q2[choice] + p["alpha_c_2"] * pe2, q2[other] + p["alpha_u_2"] * pe2
+        q2[choice], q2[other] = min(max(c2, 0.0), 1.0), min(max(o2, 0.0), 1.0)
 
-        self.b = resp @ self._transition_matrix()
-        self.b /= self.b.sum()
+        # b <- resp @ [[s0, 1-s0], [1-s1, s1]], renormalized
+        s0, s1 = p["stay_0"], p["stay_1"]
+        b0 = r0 * s0 + r1 * (1.0 - s1)
+        b1 = r0 * (1.0 - s0) + r1 * s1
+        tot = b0 + b1
+        self.b = [b0 / tot, b1 / tot]
 
     def occupancy(self):
         """Closed-form stationary occupancy, 'pi_k = 1/(1-stay_k)'
