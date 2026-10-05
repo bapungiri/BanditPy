@@ -698,6 +698,25 @@ class Qlearn2Regime(BasePolicy):
     (NOT scaled by resp — the key difference from 'Qlearn3Regime'-style
     classes) via pe = reward - q[c], q[c] += alpha_c*pe, q[~c] += alpha_u*pe;
     b <- resp @ [[stay_0, 1-stay_0], [1-stay_1, stay_1]].
+
+    Optional terms, disabled by default (the defaults reproduce the model
+    above exactly):
+
+    - Perseverance, as in 'Qlearn', shared by both regimes: a choice trace
+      h += alpha_h * (choice - h) (0 = arm 0, 1 = arm 1) adds
+      sticky * (0.5 - h) to V_k(0) and sticky * (h - 0.5) to V_k(1). With
+      no inverse temperature, 'sticky' is in the same units as the weights.
+    - 'b_init': belief in regime 0 at every reset (window start), instead
+      of 0.5, i.e. which strategy the animal starts a window with.
+
+    Enable them like 'Qlearn''s::
+
+        policy = Qlearn2Regime()
+        policy.params.alpha_h.enable()
+        policy.params.sticky.enable()
+        policy.params.b_init.enable()
+
+    Relabelling the regimes maps 'b_init' to '1 - b_init'.
     """
 
     default_beta_schedule = NoBeta
@@ -738,6 +757,27 @@ class Qlearn2Regime(BasePolicy):
         stay_1 = ParameterSpec(
             "stay_1", (0.0, 0.99), description="Probability of remaining in regime 1"
         )
+        alpha_h = ParameterSpec(
+            "alpha_h",
+            (0.0, 1.0),
+            default=0.0,
+            active=False,
+            description="Learning rate of the choice (perseverance) trace",
+        )
+        sticky = ParameterSpec(
+            "sticky",
+            (0.0, 10.0),
+            default=0.0,
+            active=False,
+            description="Perseverance weight (repeat recent choices), shared by both regimes",
+        )
+        b_init = ParameterSpec(
+            "b_init",
+            (0.0, 1.0),
+            default=0.5,
+            active=False,
+            description="Belief in regime 0 at each reset (window start)",
+        )
 
     params: Params
 
@@ -750,7 +790,9 @@ class Qlearn2Regime(BasePolicy):
         self.q1 = [0.5, 0.5]
         self.q2 = [0.5, 0.5]
         self.q_bias = np.array([1.0, -1.0])
-        self.b = [0.5, 0.5]
+        self.h = 0.5
+        b0 = self.params["b_init"]
+        self.b = [b0, 1.0 - b0]
 
     def forget(self):
         pass
@@ -761,10 +803,12 @@ class Qlearn2Regime(BasePolicy):
     def _regime_p0(self):
         """P(choose arm 0 | regime k) for k = 0, 1 (2-way softmax = logistic)."""
         p = self.params
-        q1, q2, bb = self.q1, self.q2, p["beta_bias"]
-        # V_k(0) - V_k(1); the bias agent contributes beta_bias * (1 - (-1)).
-        d0 = p["beta_q1_0"] * (q1[0] - q1[1]) + p["beta_q2_0"] * (q2[0] - q2[1]) + 2.0 * bb
-        d1 = p["beta_q1_1"] * (q1[0] - q1[1]) + p["beta_q2_1"] * (q2[0] - q2[1]) + 2.0 * bb
+        q1, q2 = self.q1, self.q2
+        # V_k(0) - V_k(1); the bias agent contributes beta_bias * (1 - (-1)),
+        # perseverance sticky * ((0.5 - h) - (h - 0.5)). Both are shared.
+        shared = 2.0 * p["beta_bias"] + 2.0 * p["sticky"] * (0.5 - self.h)
+        d0 = p["beta_q1_0"] * (q1[0] - q1[1]) + p["beta_q2_0"] * (q2[0] - q2[1]) + shared
+        d1 = p["beta_q1_1"] * (q1[0] - q1[1]) + p["beta_q2_1"] * (q2[0] - q2[1]) + shared
         return _logistic(d0), _logistic(d1)
 
     def _agent_values(self):
@@ -788,6 +832,7 @@ class Qlearn2Regime(BasePolicy):
         for a in range(agents.shape[0]):
             V += betas[:, a : a + 1] * agents[a]
         V += self.params["beta_bias"] * self.q_bias
+        V += self.params["sticky"] * np.array([0.5 - self.h, self.h - 0.5])
         return np.vstack([_softmax(V[k], 1.0) for k in range(2)])
 
     def logits(self):
@@ -836,6 +881,8 @@ class Qlearn2Regime(BasePolicy):
         b1 = r0 * (1.0 - s0) + r1 * s1
         tot = b0 + b1
         self.b = [b0 / tot, b1 / tot]
+
+        self.h += p["alpha_h"] * (choice - self.h)
 
     def occupancy(self):
         """Closed-form stationary occupancy, 'pi_k = 1/(1-stay_k)'
