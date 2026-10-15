@@ -807,8 +807,12 @@ class Qlearn2Regime(BasePolicy):
         # V_k(0) - V_k(1); the bias agent contributes beta_bias * (1 - (-1)),
         # perseverance sticky * ((0.5 - h) - (h - 0.5)). Both are shared.
         shared = 2.0 * p["beta_bias"] + 2.0 * p["sticky"] * (0.5 - self.h)
-        d0 = p["beta_q1_0"] * (q1[0] - q1[1]) + p["beta_q2_0"] * (q2[0] - q2[1]) + shared
-        d1 = p["beta_q1_1"] * (q1[0] - q1[1]) + p["beta_q2_1"] * (q2[0] - q2[1]) + shared
+        d0 = (
+            p["beta_q1_0"] * (q1[0] - q1[1]) + p["beta_q2_0"] * (q2[0] - q2[1]) + shared
+        )
+        d1 = (
+            p["beta_q1_1"] * (q1[0] - q1[1]) + p["beta_q2_1"] * (q2[0] - q2[1]) + shared
+        )
         return _logistic(d0), _logistic(d1)
 
     def _agent_values(self):
@@ -1232,25 +1236,39 @@ class SupervisedMoERegime(BasePolicy):
             "alpha_u_2", (-0.99, 0.99), description="Learning rate (unchosen), expert 2"
         )
         beta = ParameterSpec(
-            "beta", (0.1, 20.0), description="Inverse temperature (shared across experts)"
+            "beta",
+            (0.1, 20.0),
+            description="Inverse temperature (shared across experts)",
         )
         gate_0_1 = ParameterSpec(
-            "gate_0_1", (-10.0, 10.0), description="D=0 gate logit, expert 1 (ref: expert 0)"
+            "gate_0_1",
+            (-10.0, 10.0),
+            description="D=0 gate logit, expert 1 (ref: expert 0)",
         )
         gate_0_2 = ParameterSpec(
-            "gate_0_2", (-10.0, 10.0), description="D=0 gate logit, expert 2 (ref: expert 0)"
+            "gate_0_2",
+            (-10.0, 10.0),
+            description="D=0 gate logit, expert 2 (ref: expert 0)",
         )
         gate_1_1 = ParameterSpec(
-            "gate_1_1", (-10.0, 10.0), description="D=1 gate logit, expert 1 (ref: expert 0)"
+            "gate_1_1",
+            (-10.0, 10.0),
+            description="D=1 gate logit, expert 1 (ref: expert 0)",
         )
         gate_1_2 = ParameterSpec(
-            "gate_1_2", (-10.0, 10.0), description="D=1 gate logit, expert 2 (ref: expert 0)"
+            "gate_1_2",
+            (-10.0, 10.0),
+            description="D=1 gate logit, expert 2 (ref: expert 0)",
         )
         gate_2_1 = ParameterSpec(
-            "gate_2_1", (-10.0, 10.0), description="D=2 gate logit, expert 1 (ref: expert 0)"
+            "gate_2_1",
+            (-10.0, 10.0),
+            description="D=2 gate logit, expert 1 (ref: expert 0)",
         )
         gate_2_2 = ParameterSpec(
-            "gate_2_2", (-10.0, 10.0), description="D=2 gate logit, expert 2 (ref: expert 0)"
+            "gate_2_2",
+            (-10.0, 10.0),
+            description="D=2 gate logit, expert 2 (ref: expert 0)",
         )
 
     params: Params
