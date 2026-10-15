@@ -30,14 +30,16 @@ class Qlearn(BasePolicy):
     'sticky' >= 0 favours repeating recent choices (perseverance only; no
     alternation). It is allowed above 1, where perseverance can outweigh
     any Q-value difference: fitted animals sat at a +1 bound.
-    'alpha_h' and 'sticky' are disabled by default ('sticky' = 0 makes the
-    trace a no-op), so the default model is plain Q-learning with a bias.
-    Enable/disable parameters to fit other variants, e.g.::
+    All six parameters are fitted by default: animals repeat their last
+    choice far more than value learning alone predicts. Disable
+    parameters to fit other variants, e.g.::
 
         policy = Qlearn()
-        policy.params.alpha_h.enable()
-        policy.params.sticky.enable()   # + perseverance
+        policy.params.alpha_h.disable()
+        policy.params.sticky.disable()  # plain Q-learning with a bias
         policy.params.bias.disable()    # without port bias (bias = 0)
+
+    A disabled 'sticky' is 0, which makes the choice trace a no-op.
     """
 
     class Params(ParameterGroup):
@@ -54,14 +56,14 @@ class Qlearn(BasePolicy):
             "alpha_h",
             (0.0, 1.0),
             default=0.0,
-            active=False,
+            active=True,
             description="Learning rate of the choice (perseverance) trace",
         )
         sticky = ParameterSpec(
             "sticky",
             (0.0, 10.0),
             default=0.0,
-            active=False,
+            active=True,
             description="Perseverance weight (repeat recent choices)",
         )
 
