@@ -15,13 +15,18 @@ def _softmax(x: np.ndarray, beta: float) -> np.ndarray:
 
 class Qlearn(BasePolicy):
     """
-    2-arm Q-learning with counterfactual updates, a port bias term and an
-    optional perseverance (sticky) term.
+    2-arm Q-learning with counterfactual updates, a port bias term, an
+    optional perseverance (sticky) term and an optional decay of the
+    unchosen value.
 
     Update rule:
     Q[choice] += alpha_c * (reward - Q[choice])
     Q[unchosen] += alpha_u * (reward - Q[choice])
     h += alpha_h * (choice - h)          # choice trace, 0 = arm 0, 1 = arm 1
+
+    Between trials (not at a reset), the value of the arm not chosen on the
+    previous trial decays toward its initial 0.5:
+    Q[unchosen] += decay * (0.5 - Q[unchosen])
 
     Choice logits:
     logit[0] = Q[0] + bias + sticky * (0.5 - h)
@@ -40,6 +45,9 @@ class Qlearn(BasePolicy):
         policy.params.bias.disable()    # without port bias (bias = 0)
 
     A disabled 'sticky' is 0, which makes the choice trace a no-op.
+    'decay' is off by default (0, no decay); enable it with
+    'policy.params.decay.enable()'. It acts on the Q-values only, not on the
+    choice trace.
     """
 
     class Params(ParameterGroup):
@@ -66,6 +74,13 @@ class Qlearn(BasePolicy):
             active=True,
             description="Perseverance weight (repeat recent choices)",
         )
+        decay = ParameterSpec(
+            "decay",
+            (0.0, 1.0),
+            default=0.0,
+            active=False,
+            description="Decay of the unchosen Q-value toward 0.5 per trial",
+        )
 
     params: Params
 
@@ -76,9 +91,13 @@ class Qlearn(BasePolicy):
     def reset(self):
         self.q = [0.5, 0.5]
         self.h = 0.5
+        self.last_choice = None
 
     def forget(self):
-        pass
+        d = self.params["decay"]
+        if d and self.last_choice is not None:
+            other = 1 - self.last_choice
+            self.q[other] += d * (0.5 - self.q[other])
 
     def logits(self):
         b = self.params["bias"]
@@ -98,6 +117,7 @@ class Qlearn(BasePolicy):
         self.q[other] = min(max(q_o, 0.0), 1.0)
 
         self.h += self.params["alpha_h"] * (choice - self.h)
+        self.last_choice = choice
 
 
 class QlearnHierarchical(BasePolicy):
@@ -450,7 +470,9 @@ class QlearnDiff(BasePolicy):
 
     class Params(ParameterGroup):
         alpha = ParameterSpec(
-            "alpha", (0.0, 0.99), description="Learning rate for the chosen/unchosen difference"
+            "alpha",
+            (0.0, 0.99),
+            description="Learning rate for the chosen/unchosen difference",
         )
 
         bias = ParameterSpec(
