@@ -953,6 +953,10 @@ class DecisionModel:
             trials_in_block = 0
 
             while True:
+                # same per-trial order as the likelihood: forget() on every
+                # trial except the first after a reset (each block is a session)
+                if trials_in_block > 0:
+                    policy.forget()
                 logits = policy.logits()
                 c = softmax_sample(
                     logits,
@@ -1101,7 +1105,8 @@ class DecisionModel:
         for b, ((p1, p2), k, n_trials) in enumerate(
             zip(block_probs, block_regimes, n_trials_per_block)
         ):
-            if b in boundaries:
+            just_reset = b in boundaries
+            if just_reset:
                 policy.reset()
                 beta_schedule.reset()
                 session_counter += 1
@@ -1110,6 +1115,9 @@ class DecisionModel:
             one_hot[k] = 1.0
 
             for _ in range(n_trials):
+                if not just_reset:  # as in the likelihood: no forget() right after a reset
+                    policy.forget()
+                just_reset = False
                 policy.b = one_hot.copy()
                 logits = policy.logits()
                 c = softmax_sample(
