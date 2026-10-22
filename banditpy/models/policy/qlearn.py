@@ -1,3 +1,4 @@
+import math
 import numpy as np
 from banditpy.models.policy.base import BasePolicy, ParameterGroup, ParameterSpec
 from .beta_schedule import NoBeta
@@ -122,17 +123,31 @@ class Qlearn(BasePolicy):
 
 class QlearnHierarchical(BasePolicy):
     """
-    Two-option hierarchical RL for a 2-armed bandit.
+    Two-option hierarchical RL for a 2-armed bandit, with the options as
+    hypotheses about which port is better.
 
-    A meta-controller mixes two option policies. Each option holds its own
-    action values; the meta-controller maintains option values. Action
-    probabilities are a mixture of option policies, with 'beta_meta' and
-    'beta_option' controlling exploration at each level. 'logits()'
-    returns log-probabilities, so this policy uses 'NoBeta' by default.
-    Updates use soft responsibilities over options given the chosen action.
+    Option 0 starts believing port 0 is better, Q_0 = [0.5 + q_sep, 0.5 - q_sep],
+    and option 1 the reverse. A meta-controller learns how well each option
+    explains the rewards and mixes their policies:
+
+        p(a) = sum_k softmax(beta_meta * m)[k] * softmax(beta_option * Q_k)[a]
+
+    After each trial, responsibilities r_k = p(option k | chosen action) weight
+    the updates:
+
+        Q_k[choice] += alpha_q * r_k * (reward - Q_k[choice])
+        m_k         += alpha_meta * r_k * (reward - m_k)
+
+    Between trials (not after a reset) every option's Q-values relax toward
+    that option's own starting hypothesis and the meta values toward m_init:
+    x <- x0 + tau * (x - x0), so tau = 1 is no forgetting. Because the options
+    start apart and forget toward different points, they stay distinct; with
+    q_sep = 0 they would be identical forever and the meta level would have no
+    effect on choices.
+
+    'logits()' returns log-probabilities, so this policy uses 'NoBeta'.
+    'm_init' is fixed at 0.5 (a neutral reward rate) unless enabled.
     """
-
-    # _disable_common = [""]
 
     default_beta_schedule = NoBeta
 
@@ -144,13 +159,20 @@ class QlearnHierarchical(BasePolicy):
             "alpha_meta", (0.0, 1.0), description="LR for meta option values"
         )
         tau = ParameterSpec(
-            "tau", (0.5, 1.0), default=1.0, description="Forgetting factor"
+            "tau", (0.5, 1.0), default=1.0, description="Retention per trial (1 = no forgetting)"
         )
-        q_init = ParameterSpec(
-            "q_init", (0.0, 1.0), default=0.5, description="Initial action value"
+        q_sep = ParameterSpec(
+            "q_sep",
+            (0.0, 0.5),
+            default=0.25,
+            description="How strongly each option starts favouring its port",
         )
         m_init = ParameterSpec(
-            "m_init", (-1.0, 1.0), default=0.0, description="Initial meta value"
+            "m_init",
+            (0.0, 1.0),
+            default=0.5,
+            active=False,
+            description="Initial meta value",
         )
         beta_meta = ParameterSpec(
             "beta_meta", (0.1, 10.0), description="Inverse temp over options"
@@ -161,60 +183,54 @@ class QlearnHierarchical(BasePolicy):
 
     params: Params
 
-    def __init__(self, n_options: int = 2, **kwargs):
-        super().__init__(**kwargs)
-        self.n_options = n_options
+    # Plain Python floats, two options x two ports: these run once per trial in
+    # every NLL evaluation, where numpy's per-call overhead dominates.
+
+    def _priors(self):
+        d = self.params["q_sep"]
+        return ((0.5 + d, 0.5 - d), (0.5 - d, 0.5 + d))
 
     def reset(self):
-        q0 = self.params.get("q_init", 0.5)
-        m0 = self.params.get("m_init", 0.0)
-        self.q = np.full((self.n_options, 2), q0, dtype=float)
-        self.m = np.full(self.n_options, m0, dtype=float)
+        self.q = [list(q0) for q0 in self._priors()]
+        m0 = self.params["m_init"]
+        self.m = [m0, m0]
 
     def forget(self):
         tau = self.params["tau"]
-        q0 = self.params.get("q_init", 0.5)
-        m0 = self.params.get("m_init", 0.0)
-        self.q = q0 + tau * (self.q - q0)
-        self.m = m0 + tau * (self.m - m0)
+        if tau == 1.0:
+            return
+        for q, q0 in zip(self.q, self._priors()):
+            q[0] = q0[0] + tau * (q[0] - q0[0])
+            q[1] = q0[1] + tau * (q[1] - q0[1])
+        m0 = self.params["m_init"]
+        self.m = [m0 + tau * (m - m0) for m in self.m]
+
+    def _mixture(self):
+        """(p(option), p(port 1 | option)) for both options."""
+        pm1 = 1.0 / (1.0 + math.exp(-self.params["beta_meta"] * (self.m[1] - self.m[0])))
+        b = self.params["beta_option"]
+        p1 = [1.0 / (1.0 + math.exp(-b * (q[1] - q[0]))) for q in self.q]
+        return (1.0 - pm1, pm1), p1
 
     def logits(self):
-        p_meta = _softmax(self.m, self.params["beta_meta"])
-
-        beta_opt = self.params["beta_option"]
-        opt_probs = np.vstack(
-            [_softmax(self.q[i], beta_opt) for i in range(self.n_options)]
-        )
-
-        p_action = p_meta @ opt_probs
-        p_action = np.clip(p_action, 1e-9, 1.0)
-        return np.log(p_action)
+        pm, p1 = self._mixture()
+        p_port1 = pm[0] * p1[0] + pm[1] * p1[1]
+        p_port1 = min(max(p_port1, 1e-9), 1.0 - 1e-9)
+        return (math.log(1.0 - p_port1), math.log(p_port1))
 
     def update(self, choice, reward):
-        p_meta = _softmax(self.m, self.params["beta_meta"])
-        beta_opt = self.params["beta_option"]
-        opt_probs = np.vstack(
-            [_softmax(self.q[i], beta_opt) for i in range(self.n_options)]
-        )
-
-        resp = p_meta * opt_probs[:, choice]
-        resp_sum = resp.sum()
-        if resp_sum <= 0:
-            resp = np.full(self.n_options, 1.0 / self.n_options)
-        else:
-            resp /= resp_sum
+        pm, p1 = self._mixture()
+        lik = [p1[k] if choice == 1 else 1.0 - p1[k] for k in (0, 1)]
+        resp = [pm[0] * lik[0], pm[1] * lik[1]]
+        total = resp[0] + resp[1]
+        resp = [0.5, 0.5] if total <= 0 else [r / total for r in resp]
 
         aq = self.params["alpha_q"]
         am = self.params["alpha_meta"]
-
-        for k in range(self.n_options):
-            pe = reward - self.q[k, choice]
-            self.q[k, choice] += aq * resp[k] * pe
-            np.minimum(self.q[k], 1.0, out=self.q[k])
-            np.maximum(self.q[k], 0.0, out=self.q[k])
-
-            m_pe = reward - self.m[k]
-            self.m[k] += am * resp[k] * m_pe
+        for k in (0, 1):
+            q = self.q[k]
+            q[choice] = min(max(q[choice] + aq * resp[k] * (reward - q[choice]), 0.0), 1.0)
+            self.m[k] += am * resp[k] * (reward - self.m[k])
 
 
 class QlearnWM(BasePolicy):
