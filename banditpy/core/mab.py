@@ -677,12 +677,18 @@ class Bandit2Arm(BanditTask):
 
     @property
     def is_block_start(self):
-        """Boolean array, True at the start of each block. Requires block_ids."""
+        """Boolean array, True at the start of each block. Requires block_ids.
+
+        block_ids restart at 1 in every window (see 'auto_block_window_ids'), so a
+        block starts wherever the block id changes in either direction, or a new
+        window starts.
+        """
         assert self.block_ids is not None, "block_ids must be set"
-        block_starts = np.diff(self.block_ids, prepend=self.block_ids[0])
-        block_starts = np.clip(block_starts, 0, 1)
-        block_starts[0] = 1
-        return block_starts.astype(bool)
+        ids = np.asarray(self.block_ids)
+        block_starts = np.r_[True, ids[1:] != ids[:-1]]
+        if self.window_ids is not None:
+            block_starts |= self.is_window_start
+        return block_starts
 
     @property
     def is_choice_high(self):
