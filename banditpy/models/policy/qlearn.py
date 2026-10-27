@@ -121,6 +121,214 @@ class Qlearn(BasePolicy):
         self.last_choice = choice
 
 
+class QlearnCost(BasePolicy):
+    """
+    Average-reward ('relative value') Q-learning: outcomes are judged against a
+    learned average reward rate 'rho', the opportunity cost of a trial
+    (R-learning, Schwartz 1993; Daw & Touretzky 2002).
+
+    Reward rate, updated on every trial:
+
+        rho <- rho + alpha_rho * (reward - rho)
+
+    Prediction error relative to rho, and 'Qlearn' value updates:
+
+        delta        = (reward - rho) - Q[choice]
+        Q[choice]   += alpha_c * delta
+        Q[unchosen] += alpha_u * delta          (both clipped to [-1, 1])
+        h           += alpha_h * (choice - h)
+
+    Choice, as in 'Qlearn':
+
+        logit[0] = Q[0] + bias + sticky * (0.5 - h)
+        logit[1] = Q[1] - bias + sticky * (h - 0.5)
+
+    Q now means better or worse than the environment's average, so values can
+    be negative: they are clipped to [-1, 1], not [0, 1]. At each reset
+    Q = [0.5, 0.5], h = 0.5 and rho = 'rho0' (fixed at 0 unless enabled), so
+    with alpha_rho = 0 this is exactly 'Qlearn' (QlearnSticky): the extra
+    parameter alpha_rho tests whether a learned reward rate helps. Because rho shifts both ports' values by the same amount,
+    it changes choices only through how the value levels feed the next update
+    and through clipping: a weak handle, so check recovery before reading it.
+    Default active parameters: alpha_c, alpha_u, bias, alpha_h, sticky,
+    alpha_rho (+ beta from the beta schedule); 'rho0' is off.
+    """
+
+    class Params(ParameterGroup):
+        alpha_c = ParameterSpec(
+            "alpha_c", (0.0, 0.99), description="Learning rate for chosen option"
+        )
+        alpha_u = ParameterSpec(
+            "alpha_u", (-0.99, 0.99), description="Learning rate for unchosen option"
+        )
+        bias = ParameterSpec(
+            "bias", (-1.0, 1.0), default=0.0, description="Bias toward port 0 vs port 1"
+        )
+        alpha_h = ParameterSpec(
+            "alpha_h",
+            (0.0, 1.0),
+            default=0.0,
+            description="Learning rate of the choice (perseverance) trace",
+        )
+        sticky = ParameterSpec(
+            "sticky",
+            (0.0, 10.0),
+            default=0.0,
+            description="Perseverance weight (repeat recent choices)",
+        )
+        alpha_rho = ParameterSpec(
+            "alpha_rho",
+            (0.0, 1.0),
+            default=0.0,
+            description="Learning rate of the average reward rate rho",
+        )
+        rho0 = ParameterSpec(
+            "rho0",
+            (0.0, 1.0),
+            default=0.0,
+            active=False,
+            description="Average reward rate rho at each reset (0 = nests Qlearn)",
+        )
+
+    params: Params
+
+    # Plain Python floats, as in 'Qlearn' (per-trial code in every NLL evaluation).
+
+    def reset(self):
+        self.q = [0.5, 0.5]
+        self.h = 0.5
+        self.rho = self.params["rho0"]
+
+    def forget(self):
+        pass
+
+    def logits(self):
+        b = self.params["bias"]
+        stick = self.params["sticky"] * (self.h - 0.5)
+        return (self.q[0] + b - stick, self.q[1] - b + stick)
+
+    def update(self, choice, reward):
+        p = self.params
+        other = 1 - choice
+        delta = (reward - self.rho) - self.q[choice]
+        self.q[choice] = min(max(self.q[choice] + p["alpha_c"] * delta, -1.0), 1.0)
+        self.q[other] = min(max(self.q[other] + p["alpha_u"] * delta, -1.0), 1.0)
+        self.h += p["alpha_h"] * (choice - self.h)
+        self.rho += p["alpha_rho"] * (reward - self.rho)
+
+
+class QlearnMVT(BasePolicy):
+    """
+    Stay/leave model after the marginal value theorem (Charnov 1976), with the
+    opportunity cost learned from rewards (Constantino & Daw 2015). The current
+    port is a patch: stay while its local reward rate beats the environment's
+    rate 'rho', leave when it falls below.
+
+    Local rate of the port chosen on the last trial (fast; restarts at 'r0'
+    when the animal switches, a new patch starts fresh):
+
+        r_hat <- r_hat + alpha_l * (reward - r_hat)     after staying
+        r_hat <- r0    + alpha_l * (reward - r0)        after switching
+
+    Environment rate, the opportunity cost (slow, every trial):
+
+        rho <- rho + alpha_rho * (reward - rho)
+
+    Switch decision and choice:
+
+        P(switch) = sigmoid(beta * (rho - r_hat) + gamma)
+        P(c_t = c_{t-1}) = 1 - P(switch)
+
+    'gamma' is the baseline switching (negative = sticky). At each reset
+    rho = 'rho0' and r_hat = 'r0', and the first choice is 50/50 (or set by the
+    optional 'bias' toward port 0). With 'alpha_rho' = 0, rho stays at rho0 and
+    'beta * rho0 + gamma' can't be separated, so fix one of them in that case.
+    'logits()' returns log-probabilities, so this policy uses 'NoBeta'.
+    """
+
+    default_beta_schedule = NoBeta
+
+    class Params(ParameterGroup):
+        alpha_l = ParameterSpec(
+            "alpha_l",
+            (0.0, 1.0),
+            description="Learning rate of the current port's local rate",
+        )
+        alpha_rho = ParameterSpec(
+            "alpha_rho",
+            (0.0, 1.0),
+            description="Learning rate of the environment rate rho",
+        )
+        beta = ParameterSpec(
+            "beta",
+            (0.1, 50.0),
+            description="Sensitivity to the opportunity-cost gap rho - r_hat",
+        )
+        gamma = ParameterSpec(
+            "gamma",
+            (-10.0, 10.0),
+            default=0.0,
+            description="Baseline switching (negative = sticky)",
+        )
+        r0 = ParameterSpec(
+            "r0",
+            (0.0, 1.0),
+            default=0.5,
+            description="Estimate a newly visited port starts from",
+        )
+        rho0 = ParameterSpec(
+            "rho0",
+            (0.0, 1.0),
+            default=0.5,
+            description="Environment rate rho at each reset",
+        )
+        bias = ParameterSpec(
+            "bias",
+            (-1.0, 1.0),
+            default=0.0,
+            active=False,
+            description="Bias toward port 0 vs port 1 (adds +-2*bias to the port-0 logit)",
+        )
+
+    params: Params
+
+    def reset(self):
+        self.current = None  # port chosen on the last trial
+        self.r_hat = self.params["r0"]
+        self.rho = self.params["rho0"]
+
+    def forget(self):
+        pass
+
+    def logits(self):
+        p = self.params
+        side = 2.0 * p["bias"]  # toward port 0
+        if self.current is None:
+            p0 = 1.0 / (1.0 + math.exp(-side))
+        else:
+            x = p["beta"] * (self.rho - self.r_hat) + p["gamma"]
+            p_switch = (
+                1.0 / (1.0 + math.exp(-x))
+                if x >= 0
+                else math.exp(x) / (1.0 + math.exp(x))
+            )
+            p_stay = 1.0 - p_switch
+            p0 = p_stay if self.current == 0 else p_switch
+            if side:  # side bias on top of the stay/leave rule
+                lo = math.log(max(p0, 1e-12)) - math.log(max(1.0 - p0, 1e-12)) + side
+                p0 = 1.0 / (1.0 + math.exp(-lo))
+        p0 = min(max(p0, 1e-9), 1.0 - 1e-9)
+        return (math.log(p0), math.log(1.0 - p0))
+
+    def update(self, choice, reward):
+        p = self.params
+        if choice != self.current:
+            self.r_hat = p["r0"]  # new patch
+        self.r_hat += p["alpha_l"] * (reward - self.r_hat)
+        self.rho += p["alpha_rho"] * (reward - self.rho)
+        self.current = choice
+
+
 class QlearnHierarchical(BasePolicy):
     """
     Two-option hierarchical RL for a 2-armed bandit, with the options as
@@ -159,7 +367,10 @@ class QlearnHierarchical(BasePolicy):
             "alpha_meta", (0.0, 1.0), description="LR for meta option values"
         )
         tau = ParameterSpec(
-            "tau", (0.5, 1.0), default=1.0, description="Retention per trial (1 = no forgetting)"
+            "tau",
+            (0.5, 1.0),
+            default=1.0,
+            description="Retention per trial (1 = no forgetting)",
         )
         q_sep = ParameterSpec(
             "q_sep",
@@ -207,7 +418,9 @@ class QlearnHierarchical(BasePolicy):
 
     def _mixture(self):
         """(p(option), p(port 1 | option)) for both options."""
-        pm1 = 1.0 / (1.0 + math.exp(-self.params["beta_meta"] * (self.m[1] - self.m[0])))
+        pm1 = 1.0 / (
+            1.0 + math.exp(-self.params["beta_meta"] * (self.m[1] - self.m[0]))
+        )
         b = self.params["beta_option"]
         p1 = [1.0 / (1.0 + math.exp(-b * (q[1] - q[0]))) for q in self.q]
         return (1.0 - pm1, pm1), p1
@@ -229,7 +442,9 @@ class QlearnHierarchical(BasePolicy):
         am = self.params["alpha_meta"]
         for k in (0, 1):
             q = self.q[k]
-            q[choice] = min(max(q[choice] + aq * resp[k] * (reward - q[choice]), 0.0), 1.0)
+            q[choice] = min(
+                max(q[choice] + aq * resp[k] * (reward - q[choice]), 0.0), 1.0
+            )
             self.m[k] += am * resp[k] * (reward - self.m[k])
 
 

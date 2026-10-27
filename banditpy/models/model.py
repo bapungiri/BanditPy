@@ -895,6 +895,7 @@ class DecisionModel:
         prob_switch=1.0,
         seed=None,
         metadata=None,
+        blocks_per_session=1,
     ):
         """
         Simulate a policy on a multi-block 2-armed bandit with optional variable block lengths.
@@ -910,6 +911,10 @@ class DecisionModel:
                 Example: `min_trials_per_block=100`, `prob_switch=0.02` yields median ~150 trials.
             seed: RNG seed for reproducibility.
             metadata: Optional metadata stored on the returned `Bandit2Arm` task.
+            blocks_per_session: Blocks per session. The policy resets (and the
+                session id advances) only every this many blocks, so state carries
+                across the blocks of a session, like the windows of animal data.
+                Block ids still advance every block. Default 1: reset every block.
 
         Returns:
             Bandit2Arm: Simulated task with probs, choices, rewards, and block/session ids.
@@ -946,6 +951,7 @@ class DecisionModel:
 
         session_counter = 1
         block_counter = 1
+        just_reset = True  # policy.reset() was called above
 
         for (p1, p2), n_trials, p_switch in zip(
             reward_schedule, min_trials_per_block, prob_switch
@@ -954,9 +960,10 @@ class DecisionModel:
 
             while True:
                 # same per-trial order as the likelihood: forget() on every
-                # trial except the first after a reset (each block is a session)
-                if trials_in_block > 0:
+                # trial except the first after a reset
+                if not just_reset:
                     policy.forget()
+                just_reset = False
                 logits = policy.logits()
                 c = softmax_sample(
                     logits,
@@ -980,10 +987,12 @@ class DecisionModel:
                 if trials_in_block >= n_trials and rng.random() < p_switch:
                     break
 
-            session_counter += 1
             block_counter += 1
-            policy.reset()
-            beta_schedule.reset()
+            if (block_counter - 1) % blocks_per_session == 0:
+                session_counter += 1
+                policy.reset()
+                beta_schedule.reset()
+                just_reset = True
 
         return Bandit2Arm(
             probs=np.asarray(probs_list),
