@@ -25,17 +25,19 @@ class Qlearn(BasePolicy):
     Q[unchosen] += alpha_u * (reward - Q[choice])
     h += alpha_h * (choice - h)          # choice trace, 0 = arm 0, 1 = arm 1
 
-    Between trials (not at a reset), the value of the arm not chosen on the
-    previous trial decays toward its initial 0.5:
-    Q[unchosen] += decay * (0.5 - Q[unchosen])
+    At each reset Q = [q_init, q_init] and h = 0.5. Between trials (not at a
+    reset), the value of the arm not chosen on the previous trial decays
+    toward q_init:
+    Q[unchosen] += decay * (q_init - Q[unchosen])
 
-    Choice logits:
-    logit[0] = Q[0] + bias + sticky * (0.5 - h)
-    logit[1] = Q[1] - bias + sticky * (h - 0.5)
+    Choice values, softmax with the beta schedule's 'beta':
+    V[0] = beta * (Q[0] + bias) + sticky * (0.5 - h)
+    V[1] = beta * (Q[1] - bias) + sticky * (h - 0.5)
 
-    'sticky' >= 0 favours repeating recent choices (perseverance only; no
-    alternation). It is allowed above 1, where perseverance can outweigh
-    any Q-value difference: fitted animals sat at a +1 bound.
+    'sticky' sits outside beta, so it is the perseverance strength itself
+    rather than a multiple of beta (which left beta and sticky trading off
+    in fits). It is >= 0: it favours repeating recent choices (perseverance
+    only; no alternation).
     All six parameters are fitted by default: animals repeat their last
     choice far more than value learning alone predicts. Disable
     parameters to fit other variants, e.g.::
@@ -48,7 +50,9 @@ class Qlearn(BasePolicy):
     A disabled 'sticky' is 0, which makes the choice trace a no-op.
     'decay' is off by default (0, no decay); enable it with
     'policy.params.decay.enable()'. It acts on the Q-values only, not on the
-    choice trace.
+    choice trace. 'q_init' is fixed at 0.5 unless enabled; both ports start
+    at it, so without decay it only shifts the first prediction errors of
+    each reset and is weakly identifiable. Enable it together with decay.
     """
 
     class Params(ParameterGroup):
@@ -70,17 +74,24 @@ class Qlearn(BasePolicy):
         )
         sticky = ParameterSpec(
             "sticky",
-            (0.0, 10.0),
+            (0.0, 20.0),
             default=0.0,
             active=True,
-            description="Perseverance weight (repeat recent choices)",
+            description="Perseverance weight, outside beta (repeat recent choices)",
         )
         decay = ParameterSpec(
             "decay",
             (0.0, 1.0),
             default=0.0,
             active=False,
-            description="Decay of the unchosen Q-value toward 0.5 per trial",
+            description="Decay of the unchosen Q-value toward q_init per trial",
+        )
+        q_init = ParameterSpec(
+            "q_init",
+            (0.0, 1.0),
+            default=0.5,
+            active=False,
+            description="Q-values at each reset, and the decay target",
         )
 
     params: Params
@@ -90,7 +101,8 @@ class Qlearn(BasePolicy):
     # (np.clip, array construction) dominates the arithmetic.
 
     def reset(self):
-        self.q = [0.5, 0.5]
+        q0 = self.params["q_init"]
+        self.q = [q0, q0]
         self.h = 0.5
         self.last_choice = None
 
@@ -98,11 +110,15 @@ class Qlearn(BasePolicy):
         d = self.params["decay"]
         if d and self.last_choice is not None:
             other = 1 - self.last_choice
-            self.q[other] += d * (0.5 - self.q[other])
+            self.q[other] += d * (self.params["q_init"] - self.q[other])
 
     def logits(self):
+        # The caller scales the logits by beta; dividing the sticky term by
+        # beta here leaves it unscaled in the softmax.
         b = self.params["bias"]
-        stick = self.params["sticky"] * (self.h - 0.5)
+        stick = (
+            self.params["sticky"] * (self.h - 0.5) / self.beta_schedule.get_beta()
+        )
         return (self.q[0] + b - stick, self.q[1] - b + stick)
 
     def update(self, choice, reward):
@@ -138,10 +154,10 @@ class QlearnCost(BasePolicy):
         Q[unchosen] += alpha_u * delta          (both clipped to [-1, 1])
         h           += alpha_h * (choice - h)
 
-    Choice, as in 'Qlearn':
+    Choice, as in 'Qlearn' (sticky outside beta):
 
-        logit[0] = Q[0] + bias + sticky * (0.5 - h)
-        logit[1] = Q[1] - bias + sticky * (h - 0.5)
+        V[0] = beta * (Q[0] + bias) + sticky * (0.5 - h)
+        V[1] = beta * (Q[1] - bias) + sticky * (h - 0.5)
 
     Q now means better or worse than the environment's average, so values can
     be negative: they are clipped to [-1, 1], not [0, 1]. At each reset
@@ -172,9 +188,9 @@ class QlearnCost(BasePolicy):
         )
         sticky = ParameterSpec(
             "sticky",
-            (0.0, 10.0),
+            (0.0, 20.0),
             default=0.0,
-            description="Perseverance weight (repeat recent choices)",
+            description="Perseverance weight, outside beta (repeat recent choices)",
         )
         alpha_rho = ParameterSpec(
             "alpha_rho",
@@ -203,8 +219,11 @@ class QlearnCost(BasePolicy):
         pass
 
     def logits(self):
+        # Sticky outside beta, as in 'Qlearn'.
         b = self.params["bias"]
-        stick = self.params["sticky"] * (self.h - 0.5)
+        stick = (
+            self.params["sticky"] * (self.h - 0.5) / self.beta_schedule.get_beta()
+        )
         return (self.q[0] + b - stick, self.q[1] - b + stick)
 
     def update(self, choice, reward):
