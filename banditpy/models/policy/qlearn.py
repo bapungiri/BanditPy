@@ -151,7 +151,7 @@ class QlearnCost(BasePolicy):
 
         delta        = (reward - rho) - Q[choice]
         Q[choice]   += alpha_c * delta
-        Q[unchosen] += alpha_u * delta          (both clipped to [-1, 1])
+        Q[unchosen] += alpha_u * delta          (both clipped to [-rho, 1 - rho])
         h           += alpha_h * (choice - h)
 
     Choice, as in 'Qlearn' (sticky outside beta):
@@ -160,10 +160,12 @@ class QlearnCost(BasePolicy):
         V[1] = beta * (Q[1] - bias) + sticky * (h - 0.5)
 
     Q now means better or worse than the environment's average, so values can
-    be negative: they are clipped to [-1, 1], not [0, 1]. At each reset
-    Q = [0.5, 0.5], h = 0.5 and rho = 'rho0' (fixed at 0 unless enabled), so
-    with alpha_rho = 0 this is exactly 'Qlearn' (QlearnSticky): the extra
-    parameter alpha_rho tests whether a learned reward rate helps. Because rho shifts both ports' values by the same amount,
+    be negative: they are clipped to the range of reward - rho, [-rho, 1 - rho]
+    (an earlier [-1, 1] clip did not nest 'Qlearn': with alpha_u < 0 the
+    unchosen value could go below 0). At each reset Q = [0.5, 0.5], h = 0.5
+    and rho = 'rho0' (fixed at 0 unless enabled), so with alpha_rho = 0 this
+    is exactly 'Qlearn' (QlearnSticky): the extra parameter alpha_rho tests
+    whether a learned reward rate helps. Because rho shifts both ports' values by the same amount,
     it changes choices only through how the value levels feed the next update
     and through clipping: a weak handle, so check recovery before reading it.
     Default active parameters: alpha_c, alpha_u, bias, alpha_h, sticky,
@@ -230,8 +232,11 @@ class QlearnCost(BasePolicy):
         p = self.params
         other = 1 - choice
         delta = (reward - self.rho) - self.q[choice]
-        self.q[choice] = min(max(self.q[choice] + p["alpha_c"] * delta, -1.0), 1.0)
-        self.q[other] = min(max(self.q[other] + p["alpha_u"] * delta, -1.0), 1.0)
+        # Clip to the range of reward - rho (reward in [0, 1]); at rho = 0 this
+        # is Qlearn's [0, 1].
+        lo, hi = -self.rho, 1.0 - self.rho
+        self.q[choice] = min(max(self.q[choice] + p["alpha_c"] * delta, lo), hi)
+        self.q[other] = min(max(self.q[other] + p["alpha_u"] * delta, lo), hi)
         self.h += p["alpha_h"] * (choice - self.h)
         self.rho += p["alpha_rho"] * (reward - self.rho)
 
