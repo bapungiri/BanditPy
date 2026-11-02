@@ -12,7 +12,6 @@ from .ucb import EmpiricalUCB, RLUCB, BayesianUCB, RLBayesianUCB
 from .qlearn import (
     Qlearn,
     QlearnCost,
-    QlearnMVT,
     QlearnMVTHybrid,
     QlearnHierarchical,
     QlearnWM,
@@ -20,6 +19,7 @@ from .qlearn import (
     QlearnAdaptiveLR,
     QlearnDiff,
 )
+from .foraging import MVTForager
 from .thompson import ThompsonShared, ThompsonSplit
 from .state_inference import StateInference
 from .regime import (
