@@ -353,6 +353,113 @@ class QlearnMVT(BasePolicy):
         self.current = choice
 
 
+class QlearnMVTHybrid(BasePolicy):
+    """
+    'Qlearn' in which the port not chosen on the last trial is valued partly
+    by the environment's reward rate 'rho' (marginal value theorem: the value
+    of leaving is what the environment offers on average; Charnov 1976,
+    Constantino & Daw 2015).
+
+    Values and choice trace are updated as in 'Qlearn' (Q clipped to [0, 1]),
+    and the reward rate on every trial:
+
+        rho <- rho + alpha_rho * (reward - rho)
+
+    Choice, with c the port chosen on the last trial and o the other one:
+
+        W[c] = Q[c]
+        W[o] = w * Q[o] + (1 - w) * rho
+        V[0] = beta * (W[0] + bias) + sticky * (0.5 - h)
+        V[1] = beta * (W[1] - bias) + sticky * (h - 0.5)
+
+    A rich environment raises the value of leaving, so the animal switches
+    more after a run of rewards on either port. With w = 1 this is exactly
+    'Qlearn' (QlearnSticky). On the first trial after a reset, W = Q.
+    At each reset Q = [0.5, 0.5], h = 0.5 and rho = 'rho0' (fixed at 0.5
+    unless enabled). With alpha_rho = 0, rho stays at rho0 and w < 1 only
+    shrinks the other port's value toward 0.5, so compare fits with
+    alpha_rho free and fixed at 0 to test the reward rate itself.
+    Default active parameters: alpha_c, alpha_u, bias, alpha_h, sticky, w,
+    alpha_rho (+ beta from the beta schedule); 'rho0' is off.
+    """
+
+    class Params(ParameterGroup):
+        alpha_c = ParameterSpec(
+            "alpha_c", (0.0, 0.99), description="Learning rate for chosen option"
+        )
+        alpha_u = ParameterSpec(
+            "alpha_u", (-0.99, 0.99), description="Learning rate for unchosen option"
+        )
+        bias = ParameterSpec(
+            "bias", (-1.0, 1.0), default=0.0, description="Bias toward port 0 vs port 1"
+        )
+        alpha_h = ParameterSpec(
+            "alpha_h",
+            (0.0, 1.0),
+            default=0.0,
+            description="Learning rate of the choice (perseverance) trace",
+        )
+        sticky = ParameterSpec(
+            "sticky",
+            (0.0, 20.0),
+            default=0.0,
+            description="Perseverance weight, outside beta (repeat recent choices)",
+        )
+        w = ParameterSpec(
+            "w",
+            (0.0, 1.0),
+            default=1.0,
+            description="Weight of the other port's Q vs rho in its value (1 = Qlearn)",
+        )
+        alpha_rho = ParameterSpec(
+            "alpha_rho",
+            (0.0, 1.0),
+            default=0.0,
+            description="Learning rate of the environment reward rate rho",
+        )
+        rho0 = ParameterSpec(
+            "rho0",
+            (0.0, 1.0),
+            default=0.5,
+            active=False,
+            description="Environment reward rate rho at each reset",
+        )
+
+    params: Params
+
+    # Plain Python floats, as in 'Qlearn' (per-trial code in every NLL evaluation).
+
+    def reset(self):
+        self.q = [0.5, 0.5]
+        self.h = 0.5
+        self.rho = self.params["rho0"]
+        self.last_choice = None
+
+    def forget(self):
+        pass
+
+    def logits(self):
+        # Sticky outside beta, as in 'Qlearn'.
+        p = self.params
+        v = list(self.q)
+        if self.last_choice is not None:
+            o = 1 - self.last_choice
+            v[o] = p["w"] * v[o] + (1.0 - p["w"]) * self.rho
+        b = p["bias"]
+        stick = p["sticky"] * (self.h - 0.5) / self.beta_schedule.get_beta()
+        return (v[0] + b - stick, v[1] - b + stick)
+
+    def update(self, choice, reward):
+        p = self.params
+        other = 1 - choice
+        pe = reward - self.q[choice]
+        self.q[choice] = min(max(self.q[choice] + p["alpha_c"] * pe, 0.0), 1.0)
+        self.q[other] = min(max(self.q[other] + p["alpha_u"] * pe, 0.0), 1.0)
+        self.h += p["alpha_h"] * (choice - self.h)
+        self.rho += p["alpha_rho"] * (reward - self.rho)
+        self.last_choice = choice
+
+
 class QlearnHierarchical(BasePolicy):
     """
     Two-option hierarchical RL for a 2-armed bandit, with the options as

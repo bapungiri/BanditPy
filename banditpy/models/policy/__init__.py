@@ -13,6 +13,7 @@ from .qlearn import (
     Qlearn,
     QlearnCost,
     QlearnMVT,
+    QlearnMVTHybrid,
     QlearnHierarchical,
     QlearnWM,
     QlearnDynamicLR,
