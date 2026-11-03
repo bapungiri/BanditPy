@@ -50,7 +50,7 @@ class MVTForager(BasePolicy):
         )
         beta = ParameterSpec(
             "beta",
-            (0.1, 50.0),
+            (0.1, 30.0),
             description="Sensitivity to the opportunity-cost gap rho - r_hat",
         )
         gamma = ParameterSpec(
