@@ -116,9 +116,7 @@ class Qlearn(BasePolicy):
         # The caller scales the logits by beta; dividing the sticky term by
         # beta here leaves it unscaled in the softmax.
         b = self.params["bias"]
-        stick = (
-            self.params["sticky"] * (self.h - 0.5) / self.beta_schedule.get_beta()
-        )
+        stick = self.params["sticky"] * (self.h - 0.5) / self.beta_schedule.get_beta()
         return (self.q[0] + b - stick, self.q[1] - b + stick)
 
     def update(self, choice, reward):
@@ -223,9 +221,7 @@ class QlearnCost(BasePolicy):
     def logits(self):
         # Sticky outside beta, as in 'Qlearn'.
         b = self.params["bias"]
-        stick = (
-            self.params["sticky"] * (self.h - 0.5) / self.beta_schedule.get_beta()
-        )
+        stick = self.params["sticky"] * (self.h - 0.5) / self.beta_schedule.get_beta()
         return (self.q[0] + b - stick, self.q[1] - b + stick)
 
     def update(self, choice, reward):
