@@ -608,26 +608,33 @@ class QlearnDynamicLR(BasePolicy):
 
 class QlearnAdaptiveLR(BasePolicy):
     """
-    2-arm Q-learning with a reward-rate dependent adaptive learning rate.
+    'Qlearn' (6 parameters: counterfactual update, bias, choice trace and
+    sticky outside beta) whose learning rates scale with the recent reward
+    rate 'r_bar', a running average of rewards from either port.
 
-    The learning rate decreases as the recent (EWMA) reward rate rises,
-    capturing the idea that once reward has become reliably predictable
-    (e.g. the animal has settled on the better port), further updates
-    should shrink; a drop in reward rate raises the learning rate back up.
-    This is a simple scalar heuristic, not a reimplementation of any
-    specific published model.
+    With kappa > 0 the learning rates shrink as the reward rate rises: once
+    reward is reliable (e.g. settled on the better port), single outcomes
+    move the values less; a drop in reward rate brings the learning rates
+    back up. kappa < 0 does the opposite. The scaling is multiplicative, so
+    a negative alpha_u0 shrinks in magnitude (keeps its sign) as alpha_c0
+    does. With kappa_c = kappa_u = 0 this is exactly 'Qlearn'.
 
-    Note that reward rate is a lagging indicator: right after a reversal
-    it stays high for a few trials before dropping, so the learning rate
-    is briefly slow to recover exactly when fast relearning matters most.
-
-    Update rule:
+    Update rule (r_bar first, so the current outcome sets its own rate):
     r_bar <- r_bar + w_r * (reward - r_bar)
-    alpha_c <- clip(alpha_c0 - kappa_c * r_bar, 0, 1)
-    alpha_u <- clip(alpha_u0 - kappa_u * r_bar, 0, 1)
+    alpha_c = clip(alpha_c0 * (1 - kappa_c * r_bar), 0, 1)
+    alpha_u = clip(alpha_u0 * (1 - kappa_u * r_bar), -1, 1)
     pe = reward - Q[choice]
     Q[choice] += alpha_c * pe
     Q[unchosen] += alpha_u * pe
+    h += alpha_h * (choice - h)
+
+    Q clipped to [0, 1]. At each reset Q = [0.5, 0.5], h = 0.5 and
+    r_bar = 0.5. Choice values as in 'Qlearn':
+    V[0] = beta * (Q[0] + bias) + sticky * (0.5 - h)
+    V[1] = beta * (Q[1] - bias) + sticky * (h - 0.5)
+
+    Reward rate is a lagging indicator: right after a reversal it stays high
+    for a few trials, so with kappa > 0 the learning rates recover late.
     """
 
     class Params(ParameterGroup):
@@ -643,54 +650,66 @@ class QlearnAdaptiveLR(BasePolicy):
         )
         kappa_c = ParameterSpec(
             "kappa_c",
-            (0.0, 2.0),
-            description="Drop in chosen learning rate per unit reward rate",
+            (-1.0, 1.0),
+            default=0.0,
+            description="Fractional drop in the chosen learning rate per unit reward rate",
         )
         kappa_u = ParameterSpec(
             "kappa_u",
-            (0.0, 2.0),
-            description="Drop in unchosen learning rate per unit reward rate",
+            (-1.0, 1.0),
+            default=0.0,
+            description="Fractional drop in the unchosen learning rate per unit reward rate",
         )
         w_r = ParameterSpec(
             "w_r",
-            (0.02, 0.5),
-            description="EWMA weight for the reward-rate trace",
+            (0.01, 0.5),
+            default=0.1,
+            description="Learning rate of the reward-rate trace r_bar",
         )
         bias = ParameterSpec(
             "bias", (-1.0, 1.0), default=0.0, description="Bias toward port 0 vs port 1"
+        )
+        alpha_h = ParameterSpec(
+            "alpha_h",
+            (0.0, 1.0),
+            default=0.0,
+            description="Learning rate of the choice (perseverance) trace",
+        )
+        sticky = ParameterSpec(
+            "sticky",
+            (0.0, 20.0),
+            default=0.0,
+            description="Perseverance weight, outside beta (repeat recent choices)",
         )
 
     params: Params
 
     def reset(self):
-        self.q = np.full(2, 0.5)
+        self.q = [0.5, 0.5]
+        self.h = 0.5
         self.r_bar = 0.5
-        self.alpha_c = self.params["alpha_c0"]
-        self.alpha_u = self.params["alpha_u0"]
 
     def forget(self):
         pass
 
     def logits(self):
+        # Sticky outside beta, as in 'Qlearn'.
         b = self.params["bias"]
-        return np.array([self.q[0] + b, self.q[1] - b])
+        stick = self.params["sticky"] * (self.h - 0.5) / self.beta_schedule.get_beta()
+        return (self.q[0] + b - stick, self.q[1] - b + stick)
 
     def update(self, choice, reward):
+        p = self.params
         other = 1 - choice
         pe = reward - self.q[choice]
 
-        self.r_bar += self.params["w_r"] * (reward - self.r_bar)
+        self.r_bar += p["w_r"] * (reward - self.r_bar)
+        a_c = min(max(p["alpha_c0"] * (1.0 - p["kappa_c"] * self.r_bar), 0.0), 1.0)
+        a_u = min(max(p["alpha_u0"] * (1.0 - p["kappa_u"] * self.r_bar), -1.0), 1.0)
 
-        self.alpha_c = np.clip(
-            self.params["alpha_c0"] - self.params["kappa_c"] * self.r_bar, 0.0, 1.0
-        )
-        self.alpha_u = np.clip(
-            self.params["alpha_u0"] - self.params["kappa_u"] * self.r_bar, -1.0, 1.0
-        )
-
-        self.q[choice] += self.alpha_c * pe
-        self.q[other] += self.alpha_u * pe
-        np.clip(self.q, 0.0, 1.0, out=self.q)
+        self.q[choice] = min(max(self.q[choice] + a_c * pe, 0.0), 1.0)
+        self.q[other] = min(max(self.q[other] + a_u * pe, 0.0), 1.0)
+        self.h += p["alpha_h"] * (choice - self.h)
 
 
 class QlearnDiff(BasePolicy):
