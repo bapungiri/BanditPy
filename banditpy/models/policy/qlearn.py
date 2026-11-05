@@ -723,14 +723,17 @@ class QlearnAdaptiveLR(BasePolicy):
 class QlearnAdaptiveBeta(BasePolicy):
     """
     'Qlearn' (6 parameters: counterfactual update, bias, choice trace and
-    sticky outside beta) whose inverse temperature scales with the recent
-    reward rate 'r_bar', a running average of rewards from either port.
+    sticky outside beta) whose whole decision is scaled by a gain set by the
+    recent reward rate 'r_bar', a running average of rewards from either port.
 
-    With kappa_beta > 0 a low reward rate lowers the effective beta (choices
-    follow the values less: more exploration) and a high reward rate raises
-    it (exploitation); kappa_beta < 0 does the opposite. 'beta' is the value
-    at r_bar = 0.5. Sticky stays outside beta, so only the value term is
-    rescaled. With kappa_beta = 0 this is exactly 'Qlearn'.
+    The gain multiplies the value and the perseveration terms alike, so it
+    acts as a temperature on the whole choice: with kappa_beta > 0 a low
+    reward rate pulls choices toward 50/50 (exploration, perseveration
+    included) and a high reward rate sharpens them (exploitation);
+    kappa_beta < 0 does the opposite. 'beta' and 'sticky' are their values at
+    r_bar = 0.5. (Scaling the value term alone would instead hand the choice
+    to perseveration when the reward rate is low.) With kappa_beta = 0 this
+    is exactly 'Qlearn'.
 
     Update rule (learning rates fixed, as in 'Qlearn'):
     pe = reward - Q[choice]
@@ -741,12 +744,12 @@ class QlearnAdaptiveBeta(BasePolicy):
 
     Q clipped to [0, 1]. At each reset Q = [0.5, 0.5], h = 0.5 and
     r_bar = 'r_bar0' (fixed at 0 unless enabled: no reward earned yet in the
-    window, so with kappa_beta > 0 each window starts exploratory and beta
-    rises as rewards accumulate). Choice values, from the reward rate after
-    the last trial:
-    m = exp(kappa_beta * (r_bar - 0.5))
-    V[0] = beta * m * (Q[0] + bias) + sticky * (0.5 - h)
-    V[1] = beta * m * (Q[1] - bias) + sticky * (h - 0.5)
+    window, so with kappa_beta > 0 each window starts exploratory and the
+    gain rises as rewards accumulate). Choice values, from the reward rate
+    after the last trial:
+    g = exp(kappa_beta * (r_bar - 0.5))
+    V[0] = g * (beta * (Q[0] + bias) + sticky * (0.5 - h))
+    V[1] = g * (beta * (Q[1] - bias) + sticky * (h - 0.5))
     """
 
     class Params(ParameterGroup):
@@ -781,7 +784,7 @@ class QlearnAdaptiveBeta(BasePolicy):
             "kappa_beta",
             (-3.0, 3.0),
             default=0.0,
-            description="Log change in beta per unit reward rate (beta at r_bar = 0.5)",
+            description="Log change in the decision gain per unit reward rate (gain 1 at r_bar = 0.5)",
         )
         r_bar0 = ParameterSpec(
             "r_bar0",
@@ -802,11 +805,12 @@ class QlearnAdaptiveBeta(BasePolicy):
         pass
 
     def logits(self):
-        # Sticky outside beta, as in 'Qlearn'; only the value term scales with r_bar.
+        # Sticky outside beta, as in 'Qlearn'; the gain scales both terms (the
+        # caller multiplies by beta, so g * logits gives g * (beta * values + sticky term)).
         b = self.params["bias"]
-        m = math.exp(self.params["kappa_beta"] * (self.r_bar - 0.5))
+        g = math.exp(self.params["kappa_beta"] * (self.r_bar - 0.5))
         stick = self.params["sticky"] * (self.h - 0.5) / self.beta_schedule.get_beta()
-        return (m * (self.q[0] + b) - stick, m * (self.q[1] - b) + stick)
+        return (g * (self.q[0] + b - stick), g * (self.q[1] - b + stick))
 
     def update(self, choice, reward):
         p = self.params
