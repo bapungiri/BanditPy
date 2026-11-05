@@ -629,7 +629,8 @@ class QlearnAdaptiveLR(BasePolicy):
     h += alpha_h * (choice - h)
 
     Q clipped to [0, 1]. At each reset Q = [0.5, 0.5], h = 0.5 and
-    r_bar = 0.5. Choice values as in 'Qlearn':
+    r_bar = 'r_bar0' (fixed at 0 unless enabled: no reward earned yet in the
+    window). Choice values as in 'Qlearn':
     V[0] = beta * (Q[0] + bias) + sticky * (0.5 - h)
     V[1] = beta * (Q[1] - bias) + sticky * (h - 0.5)
 
@@ -681,13 +682,20 @@ class QlearnAdaptiveLR(BasePolicy):
             default=0.0,
             description="Perseverance weight, outside beta (repeat recent choices)",
         )
+        r_bar0 = ParameterSpec(
+            "r_bar0",
+            (0.0, 1.0),
+            default=0.0,
+            active=False,
+            description="Reward rate r_bar at each reset",
+        )
 
     params: Params
 
     def reset(self):
         self.q = [0.5, 0.5]
         self.h = 0.5
-        self.r_bar = 0.5
+        self.r_bar = self.params["r_bar0"]
 
     def forget(self):
         pass
@@ -710,6 +718,104 @@ class QlearnAdaptiveLR(BasePolicy):
         self.q[choice] = min(max(self.q[choice] + a_c * pe, 0.0), 1.0)
         self.q[other] = min(max(self.q[other] + a_u * pe, 0.0), 1.0)
         self.h += p["alpha_h"] * (choice - self.h)
+
+
+class QlearnAdaptiveBeta(BasePolicy):
+    """
+    'Qlearn' (6 parameters: counterfactual update, bias, choice trace and
+    sticky outside beta) whose inverse temperature scales with the recent
+    reward rate 'r_bar', a running average of rewards from either port.
+
+    With kappa_beta > 0 a low reward rate lowers the effective beta (choices
+    follow the values less: more exploration) and a high reward rate raises
+    it (exploitation); kappa_beta < 0 does the opposite. 'beta' is the value
+    at r_bar = 0.5. Sticky stays outside beta, so only the value term is
+    rescaled. With kappa_beta = 0 this is exactly 'Qlearn'.
+
+    Update rule (learning rates fixed, as in 'Qlearn'):
+    pe = reward - Q[choice]
+    Q[choice] += alpha_c * pe
+    Q[unchosen] += alpha_u * pe
+    h += alpha_h * (choice - h)
+    r_bar <- r_bar + w_r * (reward - r_bar)
+
+    Q clipped to [0, 1]. At each reset Q = [0.5, 0.5], h = 0.5 and
+    r_bar = 'r_bar0' (fixed at 0 unless enabled: no reward earned yet in the
+    window, so with kappa_beta > 0 each window starts exploratory and beta
+    rises as rewards accumulate). Choice values, from the reward rate after
+    the last trial:
+    m = exp(kappa_beta * (r_bar - 0.5))
+    V[0] = beta * m * (Q[0] + bias) + sticky * (0.5 - h)
+    V[1] = beta * m * (Q[1] - bias) + sticky * (h - 0.5)
+    """
+
+    class Params(ParameterGroup):
+        alpha_c = ParameterSpec(
+            "alpha_c", (0.0, 0.99), description="Learning rate for chosen option"
+        )
+        alpha_u = ParameterSpec(
+            "alpha_u", (-0.99, 0.99), description="Learning rate for unchosen option"
+        )
+        bias = ParameterSpec(
+            "bias", (-1.0, 1.0), default=0.0, description="Bias toward port 0 vs port 1"
+        )
+        alpha_h = ParameterSpec(
+            "alpha_h",
+            (0.0, 1.0),
+            default=0.0,
+            description="Learning rate of the choice (perseverance) trace",
+        )
+        sticky = ParameterSpec(
+            "sticky",
+            (0.0, 20.0),
+            default=0.0,
+            description="Perseverance weight, outside beta (repeat recent choices)",
+        )
+        w_r = ParameterSpec(
+            "w_r",
+            (0.01, 0.5),
+            default=0.1,
+            description="Learning rate of the reward-rate trace r_bar",
+        )
+        kappa_beta = ParameterSpec(
+            "kappa_beta",
+            (-3.0, 3.0),
+            default=0.0,
+            description="Log change in beta per unit reward rate (beta at r_bar = 0.5)",
+        )
+        r_bar0 = ParameterSpec(
+            "r_bar0",
+            (0.0, 1.0),
+            default=0.0,
+            active=False,
+            description="Reward rate r_bar at each reset",
+        )
+
+    params: Params
+
+    def reset(self):
+        self.q = [0.5, 0.5]
+        self.h = 0.5
+        self.r_bar = self.params["r_bar0"]
+
+    def forget(self):
+        pass
+
+    def logits(self):
+        # Sticky outside beta, as in 'Qlearn'; only the value term scales with r_bar.
+        b = self.params["bias"]
+        m = math.exp(self.params["kappa_beta"] * (self.r_bar - 0.5))
+        stick = self.params["sticky"] * (self.h - 0.5) / self.beta_schedule.get_beta()
+        return (m * (self.q[0] + b) - stick, m * (self.q[1] - b) + stick)
+
+    def update(self, choice, reward):
+        p = self.params
+        other = 1 - choice
+        pe = reward - self.q[choice]
+        self.q[choice] = min(max(self.q[choice] + p["alpha_c"] * pe, 0.0), 1.0)
+        self.q[other] = min(max(self.q[other] + p["alpha_u"] * pe, 0.0), 1.0)
+        self.h += p["alpha_h"] * (choice - self.h)
+        self.r_bar += p["w_r"] * (reward - self.r_bar)
 
 
 class QlearnDiff(BasePolicy):
