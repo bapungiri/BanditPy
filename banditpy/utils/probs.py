@@ -22,12 +22,13 @@ def _sample_pairs(p, n, rng, structured):
     return np.column_stack((p1, p2))
 
 
-def generate_probs_2arm(p=None, N=1000, frac_impurity=0.16):
+def generate_probs_2arm(p=None, N=1000, frac_impurity=0.16, rng=None):
     """Generate structured (sum to 1) and unstructured (sum != 1) 2-arm probabilities.
 
     Returns a tuple `(pu, ps)` each of shape (N, 2), with a fraction `frac_impurity`
     of cross-contamination between structured and unstructured sets. Equal-arm pairs
-    are excluded.
+    are excluded. 'rng' (a numpy Generator or seed) makes the draw reproducible;
+    the default is a fresh unseeded generator.
     """
     if p is None:
         p = np.array([0.2, 0.3, 0.4, 0.6, 0.7, 0.8])
@@ -35,7 +36,7 @@ def generate_probs_2arm(p=None, N=1000, frac_impurity=0.16):
     if not (0 <= frac_impurity < 0.5):
         raise ValueError("frac_impurity must be in [0, 0.5)")
 
-    rng = np.random.default_rng()
+    rng = np.random.default_rng(rng)
 
     n_impure = int(N * frac_impurity)
     n_pure = N - n_impure
