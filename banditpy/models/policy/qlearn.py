@@ -822,7 +822,7 @@ class QlearnAdaptiveBeta(BasePolicy):
         self.r_bar += p["w_r"] * (reward - self.r_bar)
 
 
-class QlearnDynamicPerseveration(BasePolicy):
+class QlearnDynamicSticky(BasePolicy):
     """
     'Qlearn' (6 parameters: counterfactual update, bias, choice trace and
     sticky outside beta) whose perseverance weight changes along the window,

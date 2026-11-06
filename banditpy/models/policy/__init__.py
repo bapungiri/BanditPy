@@ -18,7 +18,7 @@ from .qlearn import (
     QlearnDynamicLR,
     QlearnAdaptiveLR,
     QlearnAdaptiveBeta,
-    QlearnDynamicPerseveration,
+    QlearnDynamicSticky,
     QlearnDiff,
 )
 from .foraging import MVTForager
