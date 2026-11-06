@@ -822,6 +822,96 @@ class QlearnAdaptiveBeta(BasePolicy):
         self.r_bar += p["w_r"] * (reward - self.r_bar)
 
 
+class QlearnDynamicPerseveration(BasePolicy):
+    """
+    'Qlearn' (6 parameters: counterfactual update, bias, choice trace and
+    sticky outside beta) whose perseverance weight changes along the window,
+    on a fixed schedule of trials since the reset (not of outcomes):
+
+    sticky_t = sticky * (1 - (1 - k0) * exp(-t / tau))
+
+    t counts the trials already made in the window (0 for the first choice).
+    'k0' is the weight at the window start as a fraction of 'sticky', the
+    weight late in the window, and 'tau' (trials) how fast it gets there.
+    k0 < 1: perseverance builds up through the window (e.g. satiation);
+    k0 > 1: it fades. With k0 = 1 this is exactly 'Qlearn' (tau then has no
+    effect).
+
+    Update rule, as in 'Qlearn':
+    pe = reward - Q[choice]
+    Q[choice] += alpha_c * pe
+    Q[unchosen] += alpha_u * pe
+    h += alpha_h * (choice - h)
+
+    Q clipped to [0, 1]. At each reset Q = [0.5, 0.5], h = 0.5 and t = 0.
+    Choice values:
+    V[0] = beta * (Q[0] + bias) + sticky_t * (0.5 - h)
+    V[1] = beta * (Q[1] - bias) + sticky_t * (h - 0.5)
+    """
+
+    class Params(ParameterGroup):
+        alpha_c = ParameterSpec(
+            "alpha_c", (0.0, 0.99), description="Learning rate for chosen option"
+        )
+        alpha_u = ParameterSpec(
+            "alpha_u", (-0.99, 0.99), description="Learning rate for unchosen option"
+        )
+        bias = ParameterSpec(
+            "bias", (-1.0, 1.0), default=0.0, description="Bias toward port 0 vs port 1"
+        )
+        alpha_h = ParameterSpec(
+            "alpha_h",
+            (0.0, 1.0),
+            default=0.0,
+            description="Learning rate of the choice (perseverance) trace",
+        )
+        sticky = ParameterSpec(
+            "sticky",
+            (0.0, 20.0),
+            default=0.0,
+            description="Perseverance weight late in the window, outside beta",
+        )
+        k0 = ParameterSpec(
+            "k0",
+            (0.0, 3.0),
+            default=1.0,
+            description="Perseverance weight at the window start, as a fraction of sticky",
+        )
+        tau = ParameterSpec(
+            "tau",
+            (1.0, 1000.0),
+            default=100.0,
+            description="Trials for the perseverance weight to move from k0 * sticky to sticky (time constant)",
+        )
+
+    params: Params
+
+    def reset(self):
+        self.q = [0.5, 0.5]
+        self.h = 0.5
+        self.t = 0
+
+    def forget(self):
+        pass
+
+    def logits(self):
+        # Sticky outside beta, as in 'Qlearn' (the caller multiplies by beta).
+        p = self.params
+        k = 1.0 - (1.0 - p["k0"]) * math.exp(-self.t / p["tau"])
+        stick = k * p["sticky"] * (self.h - 0.5) / self.beta_schedule.get_beta()
+        b = p["bias"]
+        return (self.q[0] + b - stick, self.q[1] - b + stick)
+
+    def update(self, choice, reward):
+        p = self.params
+        other = 1 - choice
+        pe = reward - self.q[choice]
+        self.q[choice] = min(max(self.q[choice] + p["alpha_c"] * pe, 0.0), 1.0)
+        self.q[other] = min(max(self.q[other] + p["alpha_u"] * pe, 0.0), 1.0)
+        self.h += p["alpha_h"] * (choice - self.h)
+        self.t += 1
+
+
 class QlearnDiff(BasePolicy):
     """
     2-arm Q-learning driven by the chosen-vs-unchosen value difference.
