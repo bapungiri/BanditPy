@@ -26,6 +26,17 @@ class MVTForager(BasePolicy):
         P(switch) = sigmoid(beta * (rho - r_hat) + gamma)
         P(c_t = c_{t-1}) = 1 - P(switch)
 
+    Optional perseverance (off by default; 'sticky' = 0 is the model above exactly):
+    a choice trace h of port 0, as in Qlearn, h <- h + alpha_h * (1[choice = 0] - h)
+    after every trial, and the trace of the port chosen last, h_cur (h or 1 - h),
+    lowers the switch logit:
+
+        x = beta * (rho - r_hat) + gamma - sticky * (h_cur - 0.5)
+
+    Unlike the constant 'gamma', this grows with the time spent on a port and
+    carries across switches (returning to a recently used port is easier).
+    h resets to 0.5.
+
     'gamma' is the baseline switching (negative = sticky). At each reset
     rho = 'rho0' and r_hat = 'r0', and the first choice is 50/50 (or set by the
     optional 'bias' toward port 0). With 'alpha_rho' = 0, rho stays at rho0 and
@@ -78,6 +89,20 @@ class MVTForager(BasePolicy):
             active=False,
             description="Bias toward port 0 vs port 1 (adds +-2*bias to the port-0 logit)",
         )
+        alpha_h = ParameterSpec(
+            "alpha_h",
+            (0.0, 1.0),
+            default=0.0,
+            active=False,
+            description="Learning rate of the choice (perseverance) trace",
+        )
+        sticky = ParameterSpec(
+            "sticky",
+            (0.0, 20.0),
+            default=0.0,
+            active=False,
+            description="Perseverance weight on the switch logit (stay where the trace is high)",
+        )
 
     params: Params
 
@@ -85,6 +110,7 @@ class MVTForager(BasePolicy):
         self.current = None  # port chosen on the last trial
         self.r_hat = self.params["r0"]
         self.rho = self.params["rho0"]
+        self.h = 0.5  # choice trace of port 0
 
     def forget(self):
         pass
@@ -96,6 +122,9 @@ class MVTForager(BasePolicy):
             p0 = 1.0 / (1.0 + math.exp(-side))
         else:
             x = p["beta"] * (self.rho - self.r_hat) + p["gamma"]
+            if p["sticky"]:
+                h_cur = self.h if self.current == 0 else 1.0 - self.h
+                x -= p["sticky"] * (h_cur - 0.5)
             p_switch = (
                 1.0 / (1.0 + math.exp(-x))
                 if x >= 0
@@ -115,4 +144,5 @@ class MVTForager(BasePolicy):
             self.r_hat = p["r0"]  # new patch
         self.r_hat += p["alpha_l"] * (reward - self.r_hat)
         self.rho += p["alpha_rho"] * (reward - self.rho)
+        self.h += p["alpha_h"] * ((1.0 if choice == 0 else 0.0) - self.h)
         self.current = choice
