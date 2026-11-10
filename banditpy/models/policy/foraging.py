@@ -115,13 +115,22 @@ class MVTForager(BasePolicy):
     def forget(self):
         pass
 
+    def demand(self):
+        """What the current port must pay to be worth staying (here rho)."""
+        return self.rho
+
+    def gap_logit(self):
+        """Switch logit from the opportunity-cost gap, before the choice trace."""
+        p = self.params
+        return p["beta"] * (self.demand() - self.r_hat) + p["gamma"]
+
     def logits(self):
         p = self.params
         side = 2.0 * p["bias"]  # toward port 0
         if self.current is None:
             p0 = 1.0 / (1.0 + math.exp(-side))
         else:
-            x = p["beta"] * (self.rho - self.r_hat) + p["gamma"]
+            x = self.gap_logit()
             if p["sticky"]:
                 h_cur = self.h if self.current == 0 else 1.0 - self.h
                 x -= p["sticky"] * (h_cur - 0.5)
@@ -146,6 +155,73 @@ class MVTForager(BasePolicy):
         self.rho += p["alpha_rho"] * (reward - self.rho)
         self.h += p["alpha_h"] * ((1.0 if choice == 0 else 0.0) - self.h)
         self.current = choice
+
+
+class MVTForagerThirst(MVTForager):
+    """
+    'MVTForager' (learned environment rate rho) plus a thirst term that raises
+    the demand at each window start and fades as the animal drinks:
+
+        demand_n = rho + delta * exp(-n / tau_s)
+        x = beta * (demand_n - r_hat) + gamma [- sticky * (h_cur - 0.5)]
+        P(switch) = sigmoid(x)
+
+    rho, r_hat, the optional choice trace and 'bias' are exactly as in
+    'MVTForager'. 'n' is the window's clock, chosen at construction:
+    clock="rewards" (default, rewards earned so far in the window) or
+    clock="trials". n resets to 0 at each window start.
+
+    'delta' = 0 is 'MVTForager'; 'alpha_rho' = 0 is 'MVTForagerSatiety'
+    (rho0 + delta * exp(-n / tau_s), with rho0 absorbed by 'gamma'). Two
+    parameters more than 'MVTForager'. 'rho0' (which already starts above the
+    rate the animal earns) and 'delta' can trade off: check recovery.
+    """
+
+    class Params(ParameterGroup):
+        alpha_l = MVTForager.Params.alpha_l
+        alpha_rho = MVTForager.Params.alpha_rho
+        beta = MVTForager.Params.beta
+        gamma = MVTForager.Params.gamma
+        r0 = MVTForager.Params.r0
+        rho0 = MVTForager.Params.rho0
+        delta = ParameterSpec(
+            "delta",
+            (0.0, 1.0),
+            default=0.0,
+            description="Extra demand from thirst at each window start (fades with n)",
+        )
+        tau_s = ParameterSpec(
+            "tau_s",
+            (1.0, 2000.0),
+            default=100.0,
+            description="Time constant of the thirst term, in units of the clock (rewards or trials)",
+        )
+        bias = MVTForager.Params.bias
+        alpha_h = MVTForager.Params.alpha_h
+        sticky = MVTForager.Params.sticky
+
+    params: Params
+
+    def __init__(self, clock="rewards", **kwargs):
+        if clock not in ("rewards", "trials"):
+            raise ValueError("clock must be 'rewards' or 'trials'")
+        self.clock = clock
+        super().__init__(**kwargs)
+
+    def reset(self):
+        super().reset()
+        self.n = 0.0  # window clock: rewards or trials so far
+
+    def thirst(self):
+        """Fraction of the window-start thirst left, exp(-n / tau_s)."""
+        return math.exp(-self.n / self.params["tau_s"])
+
+    def demand(self):
+        return self.rho + self.params["delta"] * self.thirst()
+
+    def update(self, choice, reward):
+        super().update(choice, reward)
+        self.n += reward if self.clock == "rewards" else 1.0
 
 
 class MVTForagerSatiety(BasePolicy):
