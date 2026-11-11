@@ -1,5 +1,7 @@
 import math
 
+from scipy.special import betainc as _betainc
+
 from .base import BasePolicy, ParameterGroup, ParameterSpec
 from .beta_schedule import NoBeta
 
@@ -200,6 +202,90 @@ class MVTForagerKappa(MVTForager):
     def gap_logit(self):
         p = self.params
         return p["kappa"] * self.demand() - p["beta"] * self.r_hat + p["gamma"]
+
+
+class BayesForager(MVTForager):
+    """
+    Stay/leave forager that judges the current port by a Beta belief about its
+    reward probability theta, instead of a point estimate:
+
+        prior on arrival   Beta(n0 * rho, n0 * (1 - rho))   (centred on the environment rate)
+        evidence on port   s <- tau * s + reward,  f <- tau * f + (1 - reward)   (reset to 0 on a switch)
+        belief             Beta(n0 * rho + s, n0 * (1 - rho) + f)
+        q = P(theta < rho) (regularised incomplete beta at rho)
+        x = beta * (q - 1/2) + gamma [- sticky * (h_cur - 0.5)]
+        P(switch) = sigmoid(x)
+
+    rho is learned as in 'MVTForager' (rho <- rho + alpha_rho * (reward - rho),
+    rho = 'rho0' at each reset). On arrival q = 1/2, so the logit is 'gamma';
+    losses push q up, rewards down, and the more evidence collected on a port
+    the sharper the belief, so the same average reward makes leaving less
+    likely after a long stay than after a short one. 'tau' < 1 forgets old
+    evidence (at most ~1 / (1 - tau) trials' worth). 'n0' is the prior's
+    strength in trials. The choice trace and 'bias' are as in 'MVTForager'.
+    r_hat is kept as the belief's mean, for diagnostics only.
+    """
+
+    class Params(ParameterGroup):
+        tau = ParameterSpec(
+            "tau",
+            (0.0, 0.999),
+            default=0.9,
+            description="Retention of evidence on the current port per trial (1 = no forgetting)",
+        )
+        n0 = ParameterSpec(
+            "n0",
+            (0.1, 50.0),
+            default=2.0,
+            description="Strength of the prior on a new port, in trials",
+        )
+        alpha_rho = MVTForager.Params.alpha_rho
+        beta = ParameterSpec(
+            "beta",
+            (0.1, 30.0),
+            description="Sensitivity to the belief that the port pays less than rho",
+        )
+        gamma = MVTForager.Params.gamma
+        rho0 = MVTForager.Params.rho0
+        bias = MVTForager.Params.bias
+        alpha_h = MVTForager.Params.alpha_h
+        sticky = MVTForager.Params.sticky
+
+    params: Params
+
+    def reset(self):
+        self.current = None
+        self.s = 0.0  # discounted rewards on the current port
+        self.f = 0.0  # discounted misses on the current port
+        self.rho = self.params["rho0"]
+        self.h = 0.5
+        self.r_hat = self.rho
+
+    def _belief(self):
+        n0 = self.params["n0"]
+        rho = min(max(self.rho, 1e-6), 1.0 - 1e-6)
+        return n0 * rho + self.s, n0 * (1.0 - rho) + self.f, rho
+
+    def p_worse(self):
+        """Belief that the current port pays less than the environment, P(theta < rho)."""
+        a, b, rho = self._belief()
+        return float(_betainc(a, b, rho))
+
+    def gap_logit(self):
+        p = self.params
+        return p["beta"] * (self.p_worse() - 0.5) + p["gamma"]
+
+    def update(self, choice, reward):
+        p = self.params
+        if choice != self.current:  # new patch: evidence starts from the prior
+            self.s = self.f = 0.0
+        self.s = p["tau"] * self.s + reward
+        self.f = p["tau"] * self.f + (1.0 - reward)
+        self.rho += p["alpha_rho"] * (reward - self.rho)
+        self.h += p["alpha_h"] * ((1.0 if choice == 0 else 0.0) - self.h)
+        self.current = choice
+        a, b, _ = self._belief()
+        self.r_hat = a / (a + b)
 
 
 class MVTForagerThirst(MVTForager):

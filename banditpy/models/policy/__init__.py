@@ -21,7 +21,7 @@ from .qlearn import (
     QlearnDynamicSticky,
     QlearnDiff,
 )
-from .foraging import MVTForager, MVTForagerKappa, MVTForagerSatiety, MVTForagerThirst
+from .foraging import BayesForager, MVTForager, MVTForagerKappa, MVTForagerSatiety, MVTForagerThirst
 from .thompson import ThompsonShared, ThompsonSplit
 from .state_inference import StateInference
 from .regime import (
