@@ -157,6 +157,51 @@ class MVTForager(BasePolicy):
         self.current = choice
 
 
+class MVTForagerKappa(MVTForager):
+    """
+    'MVTForager' with separate weights on the environment rate and the local rate:
+
+        x = kappa * rho - beta * r_hat + gamma [- sticky * (h_cur - 0.5)]
+        P(switch) = sigmoid(x)
+
+    rho, r_hat, the optional choice trace and 'bias' are exactly as in
+    'MVTForager'. 'kappa' = 'beta' is 'MVTForager' (the gap beta * (rho - r_hat));
+    'kappa' = 0 drops the environment rate. With the weight tied to beta, a fast
+    rho (following the current port's rewards) cancels r_hat, so 'alpha_rho' had
+    to stay slow to keep rho's effect small; a free 'kappa' lets 'alpha_rho' set
+    only the timescale. 'kappa' may be negative (a rich environment lowering
+    switching). One parameter more than 'MVTForager'. With 'alpha_rho' = 0,
+    'kappa * rho0' and 'gamma' can't be separated.
+    """
+
+    class Params(ParameterGroup):
+        alpha_l = MVTForager.Params.alpha_l
+        alpha_rho = MVTForager.Params.alpha_rho
+        beta = ParameterSpec(
+            "beta",
+            (0.1, 30.0),
+            description="Weight of the local rate r_hat (switching falls as it rises)",
+        )
+        kappa = ParameterSpec(
+            "kappa",
+            (-30.0, 30.0),
+            default=0.0,
+            description="Weight of the environment rate rho (kappa = beta is MVTForager)",
+        )
+        gamma = MVTForager.Params.gamma
+        r0 = MVTForager.Params.r0
+        rho0 = MVTForager.Params.rho0
+        bias = MVTForager.Params.bias
+        alpha_h = MVTForager.Params.alpha_h
+        sticky = MVTForager.Params.sticky
+
+    params: Params
+
+    def gap_logit(self):
+        p = self.params
+        return p["kappa"] * self.demand() - p["beta"] * self.r_hat + p["gamma"]
+
+
 class MVTForagerThirst(MVTForager):
     """
     'MVTForager' (learned environment rate rho) plus a thirst term that raises
