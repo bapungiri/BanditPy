@@ -213,14 +213,14 @@ class MVTForagerKappaKernel(MVTForagerKappa):
         s <- s + alpha_s * (1 - s)      after staying (c_t = c_{t-1})
         s <- 0                          after switching (and at reset)
 
-        x = kappa * rho - beta * r_hat - beta_s * s + gamma [- sticky * (h_cur - 0.5)]
+        x = kappa * rho - beta * r_hat - omega * s + gamma [- sticky * (h_cur - 0.5)]
         P(switch) = sigmoid(x)
 
     s grows toward 1 with each consecutive trial on a port, whatever the
     outcomes, so switching falls with stay length beyond what r_hat explains;
     'alpha_s' sets how fast (s = 1 - (1 - alpha_s)^(n - 1) after n trials on
     the port). Unlike the optional choice trace h, s is cleared on a switch and
-    doesn't carry back to a port left earlier. 'beta_s' = 0 is
+    doesn't carry back to a port left earlier. 'omega' = 0 is
     'MVTForagerKappa' exactly. Two parameters more than 'MVTForagerKappa'.
     """
 
@@ -235,8 +235,8 @@ class MVTForagerKappaKernel(MVTForagerKappa):
             default=0.1,
             description="Growth rate of the stay kernel s (per trial on the same port)",
         )
-        beta_s = ParameterSpec(
-            "beta_s",
+        omega = ParameterSpec(
+            "omega",
             (0.0, 30.0),
             default=0.0,
             description="Weight of the stay kernel on the switch logit (stay longer as s grows)",
@@ -255,7 +255,7 @@ class MVTForagerKappaKernel(MVTForagerKappa):
         self.s = 0.0
 
     def gap_logit(self):
-        return super().gap_logit() - self.params["beta_s"] * self.s
+        return super().gap_logit() - self.params["omega"] * self.s
 
     def update(self, choice, reward):
         if choice == self.current:
