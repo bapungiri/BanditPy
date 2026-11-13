@@ -204,6 +204,67 @@ class MVTForagerKappa(MVTForager):
         return p["kappa"] * self.demand() - p["beta"] * self.r_hat + p["gamma"]
 
 
+class MVTForagerKappaKernel(MVTForagerKappa):
+    """
+    'MVTForagerKappa' with a state-history kernel on the time spent on the
+    current port (after the history-kernel foraging-RL model of Zid et al. 2026,
+    Nat Commun 17:9292, eq. 20-22):
+
+        k <- k + alpha_k * (1 - k)      after staying (c_t = c_{t-1})
+        k <- 0                          after switching (and at reset)
+
+        x = kappa * rho - beta * r_hat - beta_k * k + gamma [- sticky * (h_cur - 0.5)]
+        P(switch) = sigmoid(x)
+
+    k grows toward 1 with each consecutive trial on a port, whatever the
+    outcomes, so switching falls with stay length beyond what r_hat explains;
+    'alpha_k' sets how fast (k = 1 - (1 - alpha_k)^(n - 1) after n trials on
+    the port). Unlike the optional choice trace h, k is cleared on a switch and
+    doesn't carry back to a port left earlier. 'beta_k' = 0 is
+    'MVTForagerKappa' exactly. Two parameters more than 'MVTForagerKappa'.
+    """
+
+    class Params(ParameterGroup):
+        alpha_l = MVTForager.Params.alpha_l
+        alpha_rho = MVTForager.Params.alpha_rho
+        beta = MVTForagerKappa.Params.beta
+        kappa = MVTForagerKappa.Params.kappa
+        alpha_k = ParameterSpec(
+            "alpha_k",
+            (0.0, 1.0),
+            default=0.1,
+            description="Growth rate of the stay kernel k (per trial on the same port)",
+        )
+        beta_k = ParameterSpec(
+            "beta_k",
+            (0.0, 30.0),
+            default=0.0,
+            description="Weight of the stay kernel on the switch logit (stay longer as k grows)",
+        )
+        gamma = MVTForager.Params.gamma
+        r0 = MVTForager.Params.r0
+        rho0 = MVTForager.Params.rho0
+        bias = MVTForager.Params.bias
+        alpha_h = MVTForager.Params.alpha_h
+        sticky = MVTForager.Params.sticky
+
+    params: Params
+
+    def reset(self):
+        super().reset()
+        self.k = 0.0
+
+    def gap_logit(self):
+        return super().gap_logit() - self.params["beta_k"] * self.k
+
+    def update(self, choice, reward):
+        if choice == self.current:
+            self.k += self.params["alpha_k"] * (1.0 - self.k)
+        else:
+            self.k = 0.0
+        super().update(choice, reward)
+
+
 class BayesForager(MVTForager):
     """
     Stay/leave forager that judges the current port by a Beta belief about its
