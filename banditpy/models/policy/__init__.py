@@ -29,7 +29,7 @@ from .foraging import (
     MVTForagerSatiety,
     MVTForagerThirst,
 )
-from .thompson import ThompsonShared, ThompsonSplit
+from .thompson import ThompsonShared, ThompsonSplit, ThompsonSticky
 from .state_inference import StateInference
 from .regime import (
     Qlearn3Regime,
