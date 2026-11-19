@@ -26,6 +26,7 @@ from .foraging import (
     MVTForager,
     MVTForagerKappa,
     MVTForagerKappaKernel,
+    MVTForagerKappaKernelOutcome,
     MVTForagerSatiety,
     MVTForagerThirst,
 )

@@ -265,6 +265,58 @@ class MVTForagerKappaKernel(MVTForagerKappa):
         super().update(choice, reward)
 
 
+class MVTForagerKappaKernelOutcome(MVTForagerKappaKernel):
+    """
+    'MVTForagerKappaKernel' with an outcome-dependent stay kernel: s grows at
+    'alpha_s_rew' after a rewarded stay and at 'alpha_s_unrew' after an
+    unrewarded one,
+
+        s <- s + alpha_s_rew   * (1 - s)    after staying, rewarded
+        s <- s + alpha_s_unrew * (1 - s)    after staying, unrewarded
+        s <- 0                              after switching (and at reset)
+
+    with the switch logit as in 'MVTForagerKappaKernel'. The reward is that of
+    the trial just played on the port. 'alpha_s_rew' = 'alpha_s_unrew' is
+    'MVTForagerKappaKernel' exactly; 'alpha_s_unrew' = 0 builds stickiness
+    from rewarded stays only. One parameter more than 'MVTForagerKappaKernel'.
+    """
+
+    class Params(ParameterGroup):
+        alpha_l = MVTForager.Params.alpha_l
+        alpha_rho = MVTForager.Params.alpha_rho
+        beta = MVTForagerKappa.Params.beta
+        kappa = MVTForagerKappa.Params.kappa
+        alpha_s_rew = ParameterSpec(
+            "alpha_s_rew",
+            (0.0, 1.0),
+            default=0.1,
+            description="Growth rate of the stay kernel s after a rewarded stay",
+        )
+        alpha_s_unrew = ParameterSpec(
+            "alpha_s_unrew",
+            (0.0, 1.0),
+            default=0.1,
+            description="Growth rate of the stay kernel s after an unrewarded stay",
+        )
+        omega = MVTForagerKappaKernel.Params.omega
+        gamma = MVTForager.Params.gamma
+        r0 = MVTForager.Params.r0
+        rho0 = MVTForager.Params.rho0
+        bias = MVTForager.Params.bias
+        alpha_h = MVTForager.Params.alpha_h
+        sticky = MVTForager.Params.sticky
+
+    params: Params
+
+    def update(self, choice, reward):
+        if choice == self.current:
+            a = self.params["alpha_s_rew"] if reward > 0 else self.params["alpha_s_unrew"]
+            self.s += a * (1.0 - self.s)
+        else:
+            self.s = 0.0
+        MVTForagerKappa.update(self, choice, reward)
+
+
 class BayesForager(MVTForager):
     """
     Stay/leave forager that judges the current port by a Beta belief about its
